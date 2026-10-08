@@ -1,0 +1,64 @@
+name: Release
+
+# 打 v* 标签时自动构建并把三个包挂到 Release 上。
+# 也可以到 Actions 页面手动触发（workflow_dispatch）用来验证构建是否通过。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # scripts/build.sh 会依次跑：
+      #   make_tools.py → build.py → make_win_pkg.py → make_download_page.py
+      # 并产出 dist/ 下的全部包、docs/index.html 与 dist/SHA256SUMS。
+      # make_win_pkg.py 首次会从 python.org 下载 ~11 MB 的 Windows embeddable 运行时，
+      # 所以加一层缓存，避免每次 tag 都重下。
+      - name: 缓存 Windows 运行时
+        uses: actions/cache@v4
+        with:
+          path: dist/_winbuild
+          key: win-embed-${{ runner.os }}-py31312
+
+      - name: 构建全部产物
+        run: bash scripts/build.sh
+
+      - name: 上传构建产物（便于排查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/tunnel-manager.py
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: 创建 / 更新 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 附件名全部用 ASCII：gh CLI 曾把中文名改成 default.zip，
+          # 而 GitHub Pages 与 releases/latest/download/<name> 直链都依赖固定文件名。
+          files: |
+            dist/TunnelManager-Windows-x64.zip
+            dist/tunnel-manager.zip
+            dist/RunCheck-tool.zip
+            dist/SHA256SUMS
+          generate_release_notes: true
+
+      # GitHub Pages 从 main 分支的 /docs 目录发布；构建出的 docs/index.html
+      # 用的是 releases/latest/download/... 直链，所以 Release 建好后即可访问。
+      # Pages 的开关是仓库设置（Settings → Pages），只需开一次。

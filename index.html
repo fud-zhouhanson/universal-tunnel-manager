@@ -1,0 +1,2242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="本机所有隧道客户端的统一调度层：看清谁在接管公网、一键换出口、不走漏路由。仅绑 127.0.0.1。">
+<title>通用隧道管理 · Universal Tunnel Manager</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231b1d22'/%3E%3Cpath d='M7 12h14' stroke='%2343d9ff' stroke-width='2.8' stroke-linecap='round'/%3E%3Cpath d='M20.5 8.2 27 12l-6.5 3.8z' fill='%2343d9ff'/%3E%3Cpath d='M25 20H11' stroke='%23b28cff' stroke-width='2.8' stroke-linecap='round'/%3E%3Cpath d='M11.5 16.2 5 20l6.5 3.8z' fill='%23b28cff'/%3E%3C/svg%3E">
+<style>
+  /* ==========================================================
+     设计令牌（Design Tokens）
+     表面层次 4 级 / 语义色 6 种 / 圆角 3 档 / 字号 6 档 / 间距 8 步
+     ========================================================== */
+  :root {
+    /* 原生控件（滚动条 / 输入框 / 自动填充 / 下拉）按深色渲染，
+       否则在深色页面上会闪出一块白 */
+    color-scheme: dark;
+
+    /* — 表面层次（越靠上越亮，营造纵深）— */
+    --bg:        #131417;
+    --panel:     #1b1d22;
+    --panel2:    #22252b;
+    --panel3:    #2a2e36;
+    --border:    #31353d;
+    --hairline:  rgba(255, 255, 255, .055);
+
+    /* — 文字三级 — */
+    --text:   #e9ebef;
+    --text-2: #bfc5cf;
+    --dim:    #8b929e;
+
+    /* — 语义色（状态色，全文一致）— */
+    --green:  #3ddc84;   /* 畅通 / 直连 / 成功 */
+    --red:    #ff5b52;   /* 被接管 / 危险 / 失败 */
+    --yellow: #ffcf3f;   /* 警告 / 冲突 / 待确认 */
+    --cyan:   #43d9ff;   /* 信息 / 主操作 / 物理出口 */
+    --purple: #b28cff;   /* 隧道归属 */
+    --orange: #ffa53d;   /* 加速器 */
+
+    /* — 圆角 — */
+    --r-sm: 8px;  --r: 11px;  --r-lg: 16px;  --r-pill: 999px;
+
+    /* — 字号 — */
+    --fs-xs: 11.5px; --fs-sm: 12.5px; --fs: 13.5px;
+    --fs-md: 15px;   --fs-lg: 18px;   --fs-xl: 25px;
+
+    /* — 阴影 — */
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.7);
+    --shadow-pop: 0 16px 44px -12px rgba(0,0,0,.75);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  ::selection { background: rgba(67,217,255,.28); }
+
+  body {
+    background:
+      radial-gradient(1100px 540px at 10% -14%, rgba(67,217,255,.075), transparent 62%),
+      radial-gradient(900px 520px at 102% -6%, rgba(178,140,255,.065), transparent 58%),
+      var(--bg);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: var(--fs); line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    padding: 34px 26px 72px; max-width: 1080px; margin: 0 auto;
+  }
+
+  /* ==========================================================
+     页头
+     ========================================================== */
+  .app-head { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; }
+  .app-mark {
+    flex: 0 0 42px; width: 42px; height: 42px; border-radius: 13px;
+    display: grid; place-items: center; font-size: 19px; font-weight: 700;
+    color: var(--cyan);
+    background: linear-gradient(145deg, rgba(67,217,255,.2), rgba(178,140,255,.16));
+    border: 1px solid rgba(67,217,255,.32);
+    box-shadow: 0 0 22px -6px rgba(67,217,255,.45);
+  }
+  .app-head-txt { min-width: 0; }
+
+  h1 {
+    font-size: var(--fs-xl); font-weight: 700; line-height: 1.25;
+    letter-spacing: -.5px;
+    background: linear-gradient(96deg, #ffffff 8%, var(--cyan) 96%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: var(--cyan);
+  }
+
+  .sub { color: var(--dim); font-size: var(--fs-sm); line-height: 1.7; margin-bottom: 10px; }
+  .app-head .sub { margin-bottom: 0; margin-top: 3px; }
+
+  /* 卡片内的标题 */
+  h2 {
+    display: flex; align-items: center; gap: 9px;
+    font-size: var(--fs-md); font-weight: 650; color: var(--text);
+    letter-spacing: .1px; margin-bottom: 13px;
+  }
+  h2::before {
+    content: ''; flex: 0 0 3px; width: 3px; height: 15px; border-radius: 2px;
+    background: linear-gradient(180deg, var(--cyan), var(--purple));
+  }
+
+  /* ==========================================================
+     卡片
+     ========================================================== */
+  .card {
+    position: relative;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), transparent 130px), var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 20px 22px;
+    margin-bottom: 16px;
+    box-shadow: var(--shadow);
+    transition: border-color .2s;
+  }
+  .card:hover { border-color: #3c414b; }
+
+  /* ==========================================================
+     状态条 / 徽标 / 元信息
+     ========================================================== */
+  .status-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+  .mode-badge {
+    font-size: var(--fs-md); font-weight: 700; letter-spacing: .2px;
+    padding: 6px 17px; border-radius: var(--r-pill); white-space: nowrap;
+  }
+  .mode-direct { background: rgba(61,220,132,.14); color: var(--green);  border: 1px solid rgba(61,220,132,.42); }
+  .mode-tunnel { background: rgba(255,91,82,.14);  color: var(--red);    border: 1px solid rgba(255,91,82,.42); }
+  .mode-mixed  { background: rgba(255,207,63,.14); color: var(--yellow); border: 1px solid rgba(255,207,63,.42); }
+
+  .meta { font-size: var(--fs-sm); color: var(--dim); }
+  .meta b { color: var(--text); font-weight: 650; }
+
+  .legend {
+    font-size: var(--fs-xs); color: var(--dim); line-height: 1.75;
+    margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--hairline);
+  }
+
+  /* ==========================================================
+     概览指标（关键状态一眼扫读，代替挤成一行的文字）
+     ========================================================== */
+  .metrics {
+    display: grid; gap: 9px; margin-top: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  }
+  .metric {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 10px 13px;
+    transition: border-color .18s, background .18s;
+  }
+  .metric:hover { background: var(--panel3); border-color: #454c58; }
+  .metric .k {
+    font-size: var(--fs-xs); color: var(--dim); letter-spacing: .4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .metric .v {
+    font-size: var(--fs-lg); font-weight: 700; line-height: 1.35;
+    letter-spacing: -.2px; font-variant-numeric: tabular-nums;
+  }
+  .metric .v small { font-size: var(--fs-xs); font-weight: 500; color: var(--dim); letter-spacing: 0; }
+
+  /* 语义色工具类（供指标 / 内联文本复用，避免到处写 var()） */
+  .tone-green  { color: var(--green); }
+  .tone-red    { color: var(--red); }
+  .tone-yellow { color: var(--yellow); }
+  .tone-cyan   { color: var(--cyan); }
+  .tone-purple { color: var(--purple); }
+  .tone-orange { color: var(--orange); }
+  .tone-dim    { color: var(--dim); }
+
+  /* 单元格内的次级说明（小一号、不换行挤压） */
+  .ns { font-size: 11px; line-height: 1.5; }
+
+  /* 统一的空状态 */
+  .empty { color: var(--dim); font-size: var(--fs-sm); padding: 12px 0 12px 2px; }
+
+  /* 操作反馈行（执行中 / 结果 / 出错都用它）：左内容、右按钮，窄屏自动换行 */
+  .ops-row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 12px; flex-wrap: wrap;
+    padding: 10px 12px; margin-top: 10px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+  }
+  .ops-row > div { flex: 1 1 240px; min-width: 0; }
+  .ops-row button { flex: 0 0 auto; }
+
+  /* 提示条（callout）：承载"注意 / 说明"类信息 */
+  .callout {
+    background: rgba(178,140,255,.10);
+    border: 1px solid rgba(178,140,255,.38);
+    color: var(--purple);
+    border-radius: var(--r-sm);
+    padding: 10px 13px; margin-bottom: 12px;
+    font-size: var(--fs-sm); line-height: 1.6;
+  }
+  .callout b { color: #d9c8ff; }
+
+  /* 统一的行内表单（输入框 + 按钮） */
+  .inline-form { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .inline-form input[type="text"] { flex: 1 1 220px; width: auto; min-width: 0; }
+
+  /* ==========================================================
+     按钮
+     ========================================================== */
+  .actions { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
+  .actions .push { margin-left: auto; }
+
+  button {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600;
+    background: var(--panel2); color: var(--text-2);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 17px; cursor: pointer; white-space: nowrap;
+    transition: background .16s, border-color .16s, color .16s, transform .12s;
+  }
+  button:hover:not(:disabled) { background: var(--panel3); border-color: #4b525e; color: var(--text); transform: translateY(-1px); }
+  button:active:not(:disabled) { transform: translateY(0); }
+  button:disabled { opacity: .36; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  button.primary { background: rgba(61,220,132,.13); border-color: rgba(61,220,132,.4);  color: var(--green); }
+  button.primary:hover:not(:disabled) { background: rgba(61,220,132,.21); border-color: rgba(61,220,132,.7); }
+  button.warn    { background: rgba(255,207,63,.12); border-color: rgba(255,207,63,.38); color: var(--yellow); }
+  button.warn:hover:not(:disabled)    { background: rgba(255,207,63,.2);  border-color: rgba(255,207,63,.68); }
+  button.danger  { background: rgba(255,91,82,.11);  border-color: rgba(255,91,82,.38);  color: var(--red); }
+  button.danger:hover:not(:disabled)  { background: rgba(255,91,82,.19);  border-color: rgba(255,91,82,.68); }
+
+  /* ==========================================================
+     表格（小屏可横向滚动）
+     ========================================================== */
+  .tbl-wrap { overflow-x: auto; margin: 0 -2px 0; padding: 0 2px 2px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--fs-sm); }
+  th {
+    text-align: left; font-size: var(--fs-xs); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .6px; color: var(--dim);
+    background: var(--panel2); padding: 8px 11px; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  th:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+  th:last-child  { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+  td { padding: 9px 11px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
+  tbody tr { transition: background .14s; }
+  tbody tr:hover td { background: rgba(255,255,255,.03); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ==========================================================
+     标签 / 药丸 / 小标签
+     ========================================================== */
+  .tag {
+    display: inline-block; padding: 2.5px 9px; border-radius: 6px;
+    font-size: var(--fs-xs); font-weight: 650; white-space: nowrap;
+  }
+  .tag-ok     { background: rgba(61,220,132,.14);  color: var(--green); }
+  .tag-bad    { background: rgba(255,91,82,.14);   color: var(--red); }
+  .tag-warn   { background: rgba(255,207,63,.14);  color: var(--yellow); }
+  .tag-info   { background: rgba(67,217,255,.12);  color: var(--cyan); }
+  .tag-dim    { background: var(--panel3);         color: var(--dim); }
+  .tag-tunnel { background: rgba(178,140,255,.15); color: var(--purple); }
+  .tag-acc    { background: rgba(255,165,61,.14);  color: var(--orange); }
+
+  .cat { font-size: var(--fs-xs); color: var(--dim); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 4px; }
+  .chip {
+    display: inline-block; padding: 3.5px 11px; border-radius: var(--r-pill);
+    font-size: var(--fs-xs); font-weight: 550;
+    border: 1px solid var(--border); background: var(--panel2); color: var(--text-2);
+  }
+  .chip.vpn   { border-color: rgba(178,140,255,.5); color: var(--purple); background: rgba(178,140,255,.09); }
+  .chip.proxy { border-color: rgba(67,217,255,.5);  color: var(--cyan);   background: rgba(67,217,255,.09); }
+  .chip.acc   { border-color: rgba(255,165,61,.5);  color: var(--orange); background: rgba(255,165,61,.09); }
+  .chip.net   { border-color: rgba(61,220,132,.5);  color: var(--green);  background: rgba(61,220,132,.09); }
+
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-sm); letter-spacing: -.15px; }
+
+  /* ==========================================================
+     骨架占位（带流光）
+     ========================================================== */
+  .skel {
+    position: relative; overflow: hidden;
+    color: var(--dim); font-size: var(--fs-sm); padding: 14px 0 14px 2px;
+  }
+  .skel::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.045), transparent);
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+  @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+
+  /* ==========================================================
+     粘性导航条：分区跳转 + 扫描状态 + 进度线，三合一
+     （长页面靠它才不至于"滚到哪都忘了"）
+     ========================================================== */
+  .navwrap {
+    position: sticky; top: 10px; z-index: 70;
+    display: flex; flex-direction: column;
+    background: rgba(27,29,34,.94);
+    -webkit-backdrop-filter: saturate(1.8) blur(18px);
+    backdrop-filter: saturate(1.8) blur(18px);
+    border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: 0 10px 28px -20px rgba(0,0,0,.95);
+    margin: 20px 0 16px; overflow: hidden;
+  }
+
+  .nav { display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 9px; }
+
+  .nav-links {
+    display: flex; align-items: center; gap: 2px;
+    flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  }
+  .nav-links::-webkit-scrollbar { display: none; }
+
+  .nav-a {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 11px; border-radius: 9px;
+    font-size: var(--fs-sm); font-weight: 600; color: var(--dim);
+    text-decoration: none; white-space: nowrap;
+    transition: color .15s, background .15s;
+  }
+  .nav-a:hover { color: var(--text-2); background: rgba(255,255,255,.045); }
+  .nav-a.on    { color: var(--cyan); background: rgba(67,217,255,.11); }
+  .nav-a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
+  .nav-meta {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding-right: 3px; white-space: nowrap;
+    font-size: var(--fs-xs); color: var(--dim);
+  }
+
+  /* 扫描进度：当作导航条的"底边线"，不额外占高度、不挤动布局 */
+  .scanbar {
+    position: relative; height: 2.5px;
+    background: var(--border); overflow: hidden;
+  }
+  .scanbar-fill {
+    position: absolute; top: 0; bottom: 0; width: 34%;
+    background: linear-gradient(90deg, transparent, var(--cyan), var(--purple));
+    box-shadow: 0 0 12px rgba(67,217,255,.6);
+    animation: scanmove 1.15s ease-in-out infinite;
+  }
+  @keyframes scanmove { 0% { left: -34%; } 100% { left: 100%; } }
+
+  .scantip { display: inline-flex; align-items: center; gap: 6px; }
+  .scantip::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--cyan); animation: scanpulse 1s ease-in-out infinite;
+  }
+  @keyframes scanpulse { 0%, 100% { opacity: .28; } 50% { opacity: 1; } }
+
+  /* ── Steam 体检 ─────────────────────────────────────────
+     采样进度条与顶部 .scanbar 不同：这里是**确定的百分比**（采样秒数已知），
+     所以用实心填充而不是来回扫的动画。 */
+  .capbar { height: 6px; border-radius: 99px; background: var(--panel3); overflow: hidden; margin: 6px 0 0; }
+  .capbar > i { display: block; height: 100%; border-radius: 99px;
+                background: linear-gradient(90deg, var(--cyan), var(--purple));
+                transition: width .4s ease; }
+  .capbar.done > i { background: var(--green); }
+  .subgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(186px, 1fr)); gap: 10px; margin: 10px 0 4px; }
+  .subgrid .cell { background: var(--panel2); border: 1px solid var(--hairline); border-radius: 10px; padding: 10px 12px; }
+  .subgrid .cell .k { font-size: var(--fs-xs); color: var(--dim); margin-bottom: 3px; }
+  .subgrid .cell .v { font-size: 17px; font-weight: 600; letter-spacing: -.2px; }
+  .subgrid .cell .v small { font-size: var(--fs-xs); font-weight: 500; color: var(--dim); }
+  .findings { list-style: none; padding: 0; margin: 0; }
+  .findings > li { padding: 11px 0; border-top: 1px solid var(--hairline); }
+  .findings > li:first-child { border-top: 0; padding-top: 2px; }
+  .findings .fh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .findings .ft { font-weight: 600; }
+  .findings .fd { color: var(--text-2); font-size: var(--fs-sm); line-height: 1.65; margin-top: 5px; }
+  .findings .fa { color: var(--cyan); font-size: var(--fs-sm); margin-top: 5px; }
+  .netnote { color: var(--dim); font-size: var(--fs-xs); margin-top: 6px; }
+
+  /* 扫描失败时出现的重试 */
+  .retry {
+    font: inherit; font-size: var(--fs-xs); font-weight: 600;
+    padding: 4px 11px; border-radius: 8px; cursor: pointer;
+    background: rgba(255,91,82,.12); border: 1px solid rgba(255,91,82,.4);
+    color: var(--red); transition: background .15s;
+  }
+  .retry:hover { background: rgba(255,91,82,.2); }
+
+  /* ==========================================================
+     输入控件
+     ========================================================== */
+  textarea, input[type="text"], input[type="password"] {
+    width: 100%; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 10px 13px; font-size: var(--fs-sm); outline: none;
+    transition: border-color .16s, box-shadow .16s;
+  }
+  /* 下拉框原本没做样式，靠 color-scheme:dark 勉强能看；显式对齐一下更整齐 */
+  select {
+    background: var(--panel2); color: var(--text); cursor: pointer;
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: 9px 11px; font: inherit; font-size: var(--fs-sm); outline: none;
+    transition: border-color .16s, box-shadow .16s;
+  }
+  select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(67,217,255,.12); }
+  textarea {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    resize: vertical; min-height: 96px; margin-bottom: 10px; line-height: 1.7;
+  }
+  textarea:focus, input[type="text"]:focus, input[type="password"]:focus {
+    border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(67,217,255,.12);
+  }
+  input::placeholder, textarea::placeholder { color: var(--dim); opacity: .82; }
+
+  /* ==========================================================
+     Toast
+     ========================================================== */
+  .toast {
+    position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(8px);
+    background: var(--panel3); border: 1px solid var(--border); border-radius: var(--r);
+    padding: 12px 22px; font-size: var(--fs-sm); color: var(--text);
+    box-shadow: var(--shadow-pop); z-index: 99; display: none; max-width: 90vw;
+    opacity: 0; transition: opacity .2s, transform .2s;
+  }
+  .toast.show { display: block; opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ==========================================================
+     模态框
+     ========================================================== */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(8,9,11,.66); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+  }
+  .modal-mask.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 18px; padding: 26px; width: 420px; max-width: 90vw;
+    box-shadow: var(--shadow-pop);
+    animation: modalin .18s ease-out;
+  }
+  @keyframes modalin { from { opacity: 0; transform: translateY(10px) scale(.98); } }
+  .modal h3 { font-size: 16px; font-weight: 680; margin-bottom: 8px; }
+  .modal p  { font-size: var(--fs-sm); color: var(--dim); line-height: 1.7; margin-bottom: 16px; }
+  .modal input { margin-bottom: 16px; }
+  .modal .row, .row { display: flex; gap: 10px; justify-content: flex-end; }
+
+  /* ==========================================================
+     滚动条
+     ========================================================== */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3a3f48; border-radius: 6px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #4a515c; }
+
+  /* ==========================================================
+     体检报告 / 应急恢复
+     ========================================================== */
+  /* 结论横幅：一眼就知道"有事没事" */
+  .verdict {
+    display: flex; align-items: flex-start; gap: 11px;
+    border-radius: var(--r); padding: 13px 15px; margin-bottom: 12px;
+    font-size: var(--fs-sm); line-height: 1.62;
+  }
+  .verdict .ico { flex: 0 0 auto; font-size: 17px; line-height: 1.3; }
+  .verdict b { color: var(--text); font-weight: 700; }
+  .verdict .txt { color: var(--text-2); margin-top: 2px; }
+  .verdict .dt  { font-size: var(--fs-xs); color: var(--dim); }
+  .verdict.ok  { background: rgba(61,220,132,.1);  border: 1px solid rgba(61,220,132,.42); }
+  .verdict.ok .ico { color: var(--green); }
+  .verdict.bad { background: rgba(255,91,82,.1);   border: 1px solid rgba(255,91,82,.44); }
+  .verdict.bad .ico { color: var(--red); }
+  .verdict.warn{ background: rgba(255,207,63,.1);  border: 1px solid rgba(255,207,63,.42); }
+  .verdict.warn .ico { color: var(--yellow); }
+
+  .panel-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: var(--fs-sm); font-weight: 650; color: var(--text-2);
+    margin: 15px 0 7px;
+  }
+  .panel-title::before {
+    content: ''; width: 3px; height: 12px; border-radius: 2px;
+    background: linear-gradient(180deg, var(--cyan), var(--purple));
+  }
+
+  .issue-list { margin: 0 0 4px; padding-left: 19px; font-size: var(--fs-sm);
+                color: var(--text-2); line-height: 1.8; }
+  .issue-list li::marker { color: var(--red); }
+  .note-list  { margin: 9px 0 0; padding-left: 19px; font-size: var(--fs-xs);
+                color: var(--dim); line-height: 1.75; }
+
+  /* 应急恢复的步骤清单 */
+  .steps { list-style: none; margin: 6px 0 0; padding: 0; }
+  .steps li {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 8px 0; font-size: var(--fs-sm);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .steps li:last-child { border-bottom: none; }
+  .steps .mark { flex: 0 0 16px; font-weight: 700; }
+  .steps .nm { color: var(--text); font-weight: 600; }
+  .steps .dt { color: var(--dim); font-size: var(--fs-xs); line-height: 1.6; }
+
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 概览卡片里的即时告警（路由表与实际不一致时） */
+  .callout.bad {
+    background: rgba(255,91,82,.1);
+    border-color: rgba(255,91,82,.42);
+    color: var(--red);
+  }
+  .callout.bad b { color: #ffc0bb; }
+  .callout.bad a { color: inherit; text-decoration: underline; }
+
+  /* ==========================================================
+     分区与锚点
+     ========================================================== */
+  html { scroll-behavior: smooth; }
+  section[id] { scroll-margin-top: 80px; }
+
+  /* 卡片标题行：左标题 + 右侧操作/计数，标题不再孤零零一行 */
+  .card-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 13px;
+  }
+  .card-head h2 { margin-bottom: 0; }
+  .card-head .grow { flex: 1 1 auto; }
+  .card-head .tools { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+
+  /* ==========================================================
+     折叠面板（把诊断类信息收起来，首屏只留决策所需）
+     ========================================================== */
+  details.diag {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: var(--r); margin-top: 9px; overflow: hidden;
+  }
+  details.diag > summary {
+    cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: 9px;
+    padding: 11px 14px; font-size: var(--fs-sm); font-weight: 600;
+    color: var(--text-2); transition: background .15s, color .15s;
+  }
+  details.diag > summary::-webkit-details-marker { display: none; }
+  details.diag > summary::before {
+    content: '▸'; font-size: 11px; color: var(--dim);
+    transition: transform .18s, color .18s;
+  }
+  details.diag[open] > summary::before { transform: rotate(90deg); color: var(--cyan); }
+  details.diag > summary:hover { background: rgba(255,255,255,.04); color: var(--text); }
+  details.diag > summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+  details.diag[open] > summary { border-bottom: 1px solid var(--hairline); }
+  details.diag .body { padding: 13px 14px 15px; }
+
+  /* ==========================================================
+     小工具
+     ========================================================== */
+  kbd {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px; color: var(--text-2);
+    background: var(--panel3); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px;
+  }
+
+  /* 跳到主要内容（无障碍） */
+  .skip {
+    position: absolute; left: -9999px; top: 8px; z-index: 999;
+    background: var(--panel3); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r);
+    padding: 9px 15px; font-size: var(--fs-sm); text-decoration: none;
+  }
+  .skip:focus { left: 8px; }
+
+  /* 打印：出报告时把交互件与装饰去掉，只留内容 */
+  @media print {
+    .navwrap, .skip, .actions, .modal-mask, .toast, .inline-form,
+    .retry, .scanbar, .scantip { display: none !important; }
+    body { background: #fff; color: #000; padding: 0; max-width: none; }
+    .card, details.diag { border-color: #bbb; box-shadow: none; break-inside: avoid; }
+    h1 { -webkit-text-fill-color: #000; color: #000; }
+    details.diag { display: block; }
+    details.diag > summary { color: #000; }
+  }
+
+  /* ==========================================================
+     响应式
+     ========================================================== */
+  @media (max-width: 760px) {
+    body { padding: 20px 14px 56px; }
+    :root { --fs-xl: 21px; }
+    h1 { letter-spacing: -.3px; }
+    .card { padding: 16px; border-radius: 14px; }
+    .status-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .metrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .metric { padding: 9px 11px; }
+    .metric .v { font-size: var(--fs-md); }
+    .actions { flex-direction: column; align-items: stretch; }
+    .actions button { width: 100%; }
+    .actions .push { margin-left: 0; }
+    .app-mark { flex-basis: 36px; width: 36px; height: 36px; font-size: 16px; border-radius: 11px; }
+    th, td { padding: 8px 9px; }
+    .modal { padding: 20px; }
+
+    /* 窄屏：导航条贴顶、只横向滚动分区链接；状态文字让位给"更新于…" */
+    .navwrap { top: 6px; border-radius: var(--r); margin-bottom: 13px; }
+    .nav { height: 42px; gap: 8px; padding: 0 6px; }
+    .nav-a { padding: 6px 9px; }
+    section[id] { scroll-margin-top: 64px; }
+    .card-head { gap: 8px; margin-bottom: 11px; }
+    details.diag > summary { padding: 10px 12px; }
+    details.diag .body { padding: 11px 12px 13px; }
+  }
+
+  @media (max-width: 480px) {
+    .metrics { grid-template-columns: 1fr 1fr; }
+    .mode-badge { font-size: var(--fs); padding: 5px 13px; }
+  }
+
+  /* ==========================================================
+     页脚免责声明
+     ========================================================== */
+  .app-foot {
+    margin: 22px 2px 0; padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: var(--fs-xs); color: var(--dim); line-height: 1.85;
+  }
+  .app-foot b { color: var(--text); }
+  .app-foot .tone-dim { color: #6b727e; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="app-head">
+  <div class="app-mark" aria-hidden="true">⇄</div>
+  <div class="app-head-txt">
+    <h1>通用隧道管理</h1>
+    <div class="sub" id="subText">自动识别本机所有 VPN / 加速器 / 代理(梯子) / 覆盖网络隧道，一键切换。仅绑 127.0.0.1。</div>
+  </div>
+</header>
+
+<!-- 粘性导航：分区跳转 + 扫描状态 + 进度线 -->
+<div class="navwrap">
+  <nav class="nav" id="nav" aria-label="页面分区导航">
+    <div class="nav-links">
+      <a class="nav-a" href="#s-overview">概览</a>
+      <a class="nav-a" href="#s-health">体检急救</a>
+      <a class="nav-a" href="#s-outlets">出口管理</a>
+      <a class="nav-a" href="#s-routes">域名路由</a>
+      <a class="nav-a" href="#s-domains">域名列表</a>
+      <a class="nav-a" href="#s-auto">自动追踪</a>
+      <a class="nav-a" href="#s-steam">Steam 体检</a>
+      <a class="nav-a" href="#s-diag">诊断</a>
+    </div>
+    <div class="nav-meta">
+      <span id="navWho"></span>
+      <span class="scantip" id="scanTip" style="display:none"><span id="scanTipText">正在扫描…</span></span>
+      <button class="retry" id="btnRetry" type="button" style="display:none">↻ 重试</button>
+    </div>
+  </nav>
+  <div class="scanbar" id="scanBar" style="display:none" role="progressbar" aria-label="扫描进度">
+    <div class="scanbar-fill"></div>
+  </div>
+</div>
+
+<noscript>
+  <div class="card"><div class="sub">这个页面靠 JavaScript 扫描本机网络、读写路由表。请在浏览器里启用 JavaScript 后再打开。</div></div>
+</noscript>
+
+<main id="main">
+
+<!-- ── 概览：一眼看清"现在什么状态 + 能做什么" ─────────── -->
+<section class="card" id="s-overview" aria-labelledby="h-overview">
+  <div class="card-head">
+    <h2 id="h-overview">当前状态</h2>
+    <span class="grow"></span>
+    <div class="tools">
+      <button id="btnDiag" type="button"
+        title="把当前网络状态整理成一段纯文本复制到剪贴板，方便贴给别人排查问题">⧉ 复制诊断信息</button>
+    </div>
+  </div>
+  <div class="status-bar">
+    <span id="modeBadge" class="mode-badge mode-direct">扫描中…</span>
+    <span class="meta" id="meta"></span>
+  </div>
+  <div class="metrics" id="metrics"></div>
+  <div class="actions">
+    <button class="primary" id="btnApply" disabled>⇄ 切到本机直连</button>
+    <button class="warn" id="btnUndo" disabled>↩ 交回隧道</button>
+    <button id="btnDaemonInstall" disabled style="display:none">⚙ 装守护（30 秒自动补回）</button>
+    <button class="danger" id="btnDaemonRemove" disabled style="display:none">✕ 卸守护</button>
+    <button id="btnRescan" class="push">↻ 重新扫描</button>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="callout bad" id="truthWarn" style="display:none;margin-top:12px"></div>
+</section>
+
+<!-- ── 体检与急救：出问题时第一个该来的地方 ───────────── -->
+<section class="card" id="s-health" aria-labelledby="h-health">
+  <div class="card-head">
+    <h2 id="h-health">网络体检 · 应急恢复</h2>
+    <span class="grow"></span>
+    <div class="tools">
+      <button class="primary" id="btnTrace" type="button">🔍 检查真实流量走向</button>
+      <button class="danger" id="btnRescue" type="button">🚑 一键应急恢复</button>
+      <button id="btnSaveHealth" type="button"
+        title="把当前这套「能用」的配置（物理网卡 / 网关 / DNS）存成基线，应急恢复时优先还原它">💾 保存健康基线</button>
+    </div>
+  </div>
+  <div class="sub" style="margin-bottom:10px">
+    <b>什么时候用它：</b>网页打不开、App 连不上、明明显示「已加速」却没效果、改过 DNS 之后整台上不了网 ——
+    这些情况<b>光看配置文件是查不出来的</b>，因为路由表和 DNS 都只是「声明」，不是「事实」。<br>
+    · <b>检查真实流量走向</b>：真解析一次、真连一次、真看第一跳（TTL=1 的包会逼第一跳报出自己是谁），
+    然后告诉你流量<i>实际</i>从哪出去、有没有被拽进隧道或黑洞、DNS 有没有被换成假 IP 池。<br>
+    · <b>一键应急恢复</b>：把默认路由、假 IP 池路由、DNS 和 DNS 缓存一次救回本机直连的干净状态（需要管理员密码，过程中网络会短暂中断）。<br>
+    · <b>保存健康基线</b>：在「现在一切正常」的时候存一份，以后应急恢复会优先还原它而不是清空。
+  </div>
+  <div id="traceOut"></div>
+  <div id="rescueOut"></div>
+</section>
+
+<!-- ── 出口管理：本工具的主功能，放在最显眼处 ─────────── -->
+<section class="card" id="s-outlets" aria-labelledby="h-outlets">
+  <div class="card-head">
+    <h2 id="h-outlets">出口管理</h2>
+    <span class="grow"></span>
+    <div class="tools"><span class="meta" id="outletCount"></span></div>
+  </div>
+  <div class="sub" style="margin-bottom:8px">本机所有能当网络出口的隧道客户端。建议任意时刻只留一个 —— 两个「全量接管型」的客户端同时开会在路由表里互抢最长前缀，表现为「显示在加速但没效果」。</div>
+  <div class="status-bar">
+    <span id="sceneBadge" class="mode-badge mode-direct">判定中…</span>
+    <span class="meta" id="sceneDesc"></span>
+  </div>
+  <div id="sceneDirectors" style="margin-top:10px"></div>
+  <div id="outletList" style="margin-top:12px"></div>
+  <div id="sceneSteps" style="margin-top:10px"></div>
+</section>
+
+<!-- ── 域名路由：回答"我的流量从哪出去" ───────────────── -->
+<section class="card" id="s-routes" aria-labelledby="h-routes">
+  <div class="card-head"><h2 id="h-routes">目标域名的路由走向</h2></div>
+  <div class="sub" style="margin-bottom:10px">
+    这张表回答一个问题：<b>我关心的网站，流量现在是从哪出去的？</b><br>
+    · 「直连 ✓」= 走物理网卡（你家/学校的正常网络） · 「被隧道接管」= 走了 VPN/加速器/梯子<br>
+    · 想把某个网站从隧道里「拔出来」→ 用顶部「⇄ 切到本机直连」，它会给这些域名逐个加 /32 直连路由<br>
+    · 要增删域名，用下面紧邻的「<a href="#s-domains" style="color:var(--cyan)">需要直连的域名列表</a>」；也可以开「<a href="#s-auto" style="color:var(--cyan)">自动追踪</a>」让新开的网站自动出现
+  </div>
+  <div id="vpnExclBox" class="callout" style="display:none"></div>
+  <div class="skel" id="domSkeleton">扫描中…</div>
+  <div class="tbl-wrap"><table id="domTable" style="display:none">
+    <thead><tr><th>域名</th><th>解析 IP</th><th>当前出口</th><th>判定</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<!-- ── 域名列表：紧邻上表，指代不再跨卡片 ─────────────── -->
+<section class="card" id="s-domains" aria-labelledby="h-domains">
+  <div class="card-head"><h2 id="h-domains">需要直连的域名列表（可自定义）</h2></div>
+  <div class="sub" style="margin-bottom:10px">这些域名的流量会在「隧道」和「本机直连」间切换，按需增删 —— <b>每行一个域名</b>。</div>
+  <textarea id="domainEditor" placeholder="每行一个域名，例如&#10;copilot.tencent.com&#10;www.workbuddy.cn"></textarea>
+  <div class="row">
+    <button id="btnResetDomains">恢复默认</button>
+    <button class="primary" id="btnSaveDomains">保存并重扫</button>
+  </div>
+</section>
+
+<!-- ── 自动追踪 ───────────────────────────────────────── -->
+<section class="card" id="s-auto" aria-labelledby="h-auto">
+  <div class="card-head">
+    <h2 id="h-auto">自动追踪 · 新开的网站</h2>
+    <span class="grow"></span>
+    <div class="tools"><span class="meta" id="autoCount"></span></div>
+  </div>
+  <div class="sub" style="margin-bottom:10px">
+    开着之后，你浏览器里<b>新打开的网站会自动出现在上面的路由表里</b>；关掉超过 10 分钟没再看的会自动移除。<br>
+    原理：每 30 秒只读扫一次浏览器历史（Chrome / Edge / Firefox / Safari）。<b>不记录、不上传任何数据</b>，只在本机内存里转一圈。<br>
+    Safari 需要在「系统设置 → 隐私与安全性 → 完全磁盘访问」里给终端授权；没有权限时用下面的输入框手动加。
+  </div>
+  <div class="actions" style="margin-top:0;margin-bottom:12px">
+    <button id="btnAutoEnable" class="primary">▶ 开启自动追踪</button>
+    <button id="btnAutoDisable" class="warn">⏸ 关闭自动追踪</button>
+  </div>
+  <div class="inline-form">
+    <input id="quickDomainInput" type="text" placeholder="手动加一个网站，如 www.example.com"
+      aria-label="手动添加要追踪的网站域名">
+    <button id="btnQuickAdd" class="primary">＋ 加入追踪</button>
+  </div>
+  <div class="chips" id="autoChips"></div>
+</section>
+
+<!-- ── Steam 体检：三张不同的网，分别回答三个问题 ─────── -->
+<section class="card" id="s-steam" aria-labelledby="h-steam">
+  <div class="card-head">
+    <h2 id="h-steam">Steam 体检</h2>
+    <span class="grow"></span>
+    <div class="tools">
+      <button id="btnSteamOverview" type="button" title="只读 Steam 自己写的日志，不跑任何网络探测，秒出">⟳ 读日志快照</button>
+      <label class="ns" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"
+        title="从 Valve 官方接口重新拉取这个游戏的中继名单。本机 Steam 缓存只在上次联网时更新，中继 IP 会换号">
+        <input type="checkbox" id="sdrRefresh">刷新 SDR 名单
+      </label>
+      <button class="primary" id="btnSteamProbe" type="button" title="真解析、真连接、真看第一跳，需要十几秒">📡 实时探测</button>
+      <button id="btnSteamDiag" type="button" title="把三类观测汇进规则库，逐条给原因与建议">🩺 诊断结论</button>
+    </div>
+  </div>
+  <div class="sub" style="margin-bottom:10px">
+    <b>Steam 不是一个网络，而是三张互不相干的网</b>，它们可以分别走不同的出口 —— 这正是「明明在加速却没效果」的根源：<br>
+    · <b>平台网</b>（登录 / 好友 / 商店）：WebSocket 443，走 CM 集群 → 对应下文的「联机延迟」<br>
+    · <b>游戏联机网</b>：UDP 27015–27060，走 Valve 的 <b>SDR 中继</b>（杀戮尖塔这类游戏<b>不是双方直连</b>）→ 对应「联机稳不稳」<br>
+    · <b>内容分发网</b>（商店 / 下载）：HTTP，走你下载区域（CellID）对应的 CDN → 对应「下载走没走加速、多快」
+  </div>
+  <div class="status-bar">
+    <span id="steamBadge" class="mode-badge mode-direct">读取中…</span>
+    <span class="meta" id="steamMeta"></span>
+  </div>
+  <div class="metrics" id="steamMetrics"></div>
+  <div id="steamErr" class="callout bad" style="display:none;margin-top:12px"></div>
+
+  <details class="diag" id="detSteamP2P" open>
+    <summary>① P2P 联机稳定性（采样实测）</summary>
+    <div class="body">
+      <div class="sub" style="margin-bottom:8px">
+        联机质量<b>单看配置得不出结论</b>，必须在对局里边跑边采。<br>
+        <b>怎么用：</b>进游戏开一局（最好已经和朋友联上）→ 回这里点「开始采样」→ 采样期间留在游戏里。
+        采样用 <span class="mono">nettop</span> 逐进程读 Steam 的收发字节数，<b>不抓包、不上传、只在本机内存里转一圈</b>。
+      </div>
+      <div class="inline-form">
+        <select id="capSecs" aria-label="采样时长">
+          <option value="30">30 秒</option>
+          <option value="60" selected>60 秒（推荐）</option>
+          <option value="120">120 秒</option>
+        </select>
+        <button class="primary" id="btnCapStart" type="button">▶ 开始采样</button>
+        <button class="warn" id="btnCapStop" type="button" disabled>■ 停止</button>
+      </div>
+      <div id="capState" class="sub" style="margin:0"></div>
+      <div class="capbar" id="capBar" style="display:none" role="progressbar" aria-label="采样进度"><i id="capBarFill" style="width:0%"></i></div>
+      <div id="capOut"></div>
+    </div>
+  </details>
+
+  <details class="diag" id="detSteamLat" open>
+    <summary>② 联机延迟（平台网 + 游戏中继）</summary>
+    <div class="body">
+      <div class="sub" style="margin-bottom:8px">
+        <b>两个层面不能混为一谈：</b>「CM 接入区延迟」是你登录 Steam、看好友与商店的延迟；
+        「中继 RTT」才是游戏联机数据包实际要走的路径质量。下面两栏分开列。
+      </div>
+      <div class="skel" id="latSkeleton">点上面的「实时探测」后出结果…</div>
+      <div class="tbl-wrap"><table id="cmTable" style="display:none">
+        <thead><tr><th>接入区</th><th>CM 主机</th><th>实测延迟</th><th>更新时间</th></tr></thead>
+        <tbody id="cmBody"></tbody>
+      </table></div>
+      <div class="tbl-wrap"><table id="relayTable" style="display:none;margin-top:10px">
+        <thead><tr><th>中继</th><th>地点</th><th>IP</th><th>ICMP 参考值</th><th>走哪条路</th></tr></thead>
+        <tbody id="relayBody"></tbody>
+      </table></div>
+      <div class="netnote" id="relayNote" style="display:none"></div>
+      <div class="netnote" id="latNote" style="display:none"></div>
+    </div>
+  </details>
+
+  <details class="diag" id="detSteamStore" open>
+    <summary>③ 商店与下载：走的是直连还是加速器</summary>
+    <div class="body">
+      <div class="sub" style="margin-bottom:8px">
+        <b>想看下载速度怎么测：</b>在 Steam 里开始下载 → 回到这里点「① 开始采样」→
+        得到的速率就是<b>真实下载速度</b>，同时会告诉你这些字节<b>走了哪个网卡</b>（物理 / 隧道）。<br>
+        <span class="tone-yellow">这里刻意不做「自动测速」</span>：Steam 的下载分片需要 depot key 才能拉，
+        拿不到确定大小的文件，硬凑一个 Mbps 出来是假的 —— 真速度只能边下边测。
+      </div>
+      <div class="skel" id="storeSkeleton">点上面的「实时探测」后出结果…</div>
+      <div class="tbl-wrap"><table id="storeTable" style="display:none">
+        <thead><tr><th>域名</th><th>解析 IP</th><th>TCP 延迟</th><th>第一跳</th><th>走哪条路</th></tr></thead>
+        <tbody id="storeBody"></tbody>
+      </table></div>
+      <div class="tbl-wrap"><table id="cdnTable" style="display:none;margin-top:10px">
+        <thead><tr><th>下载主机</th><th>来源</th><th>TCP 延迟</th><th>走哪条路</th></tr></thead>
+        <tbody id="cdnBody"></tbody>
+      </table></div>
+    </div>
+  </details>
+
+  <details class="diag" id="detSteamDiag">
+    <summary>④ 诊断结论与建议</summary>
+    <div class="body">
+      <div class="sub" style="margin-bottom:8px">
+        把上面三块观测汇进规则库，逐条给「原因 + 建议」。<b>没有证据的项不会硬下结论。</b>
+      </div>
+      <div id="steamDiagOut"><div class="empty">点上面的「🩺 诊断结论」后出结果。</div></div>
+    </div>
+  </details>
+</section>
+
+<!-- ── 诊断：默认折叠，首屏只留决策所需 ───────────────── -->
+<section class="card" id="s-diag" aria-labelledby="h-diag">
+  <div class="card-head">
+    <h2 id="h-diag">诊断与细节</h2>
+    <span class="grow"></span>
+    <div class="tools"><span class="meta" id="diagSummary"></span></div>
+  </div>
+
+  <details class="diag" id="detIface">
+    <summary>网络接口与隧道归属</summary>
+    <div class="body">
+      <div class="skel" id="ifaceSkeleton">扫描中…</div>
+      <div class="tbl-wrap"><table id="ifaceTable" style="display:none">
+        <thead><tr><th>接口</th><th>类型</th><th>归属</th><th>IPv4</th><th>状态</th><th>备注</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+  </details>
+
+  <details class="diag" id="probeCard" style="display:none">
+    <summary>聚合路由多点抽查（隐性接管检测）</summary>
+    <div class="body">
+      <div class="sub" style="margin-bottom:8px">部分高级 VPN 保留默认路由走物理网卡，改用聚合路由（1/8…240/4）隐性接管公网。下表为公网多点探测命中隧道的接口。</div>
+      <div class="tbl-wrap"><table id="probeTable">
+        <thead><tr><th>接口</th><th>命中探测点</th><th>判定</th></tr></thead>
+        <tbody id="probeBody"></tbody>
+      </table></div>
+    </div>
+  </details>
+
+  <details class="diag" id="detSoft">
+    <summary>检测到的隧道软件</summary>
+    <div class="body">
+      <div class="skel" id="softSkeleton">检测中…</div>
+      <div class="chips" id="softChips" style="display:none"></div>
+    </div>
+  </details>
+</section>
+
+<footer class="app-foot">
+  <b>免责声明</b>：这是一个<b>免费开源项目</b>，按「现状」（AS IS）提供，<b>不提供任何担保</b>；
+  在适用法律允许的最大范围内，作者及贡献者<b>不承担任何责任</b>。
+  本工具会修改本机路由表与 DNS 配置，<b>误用可能导致暂时断网</b>，请自行评估并承担全部风险。
+  请只从官方 Release 下载并核对 SHA256 —— 任何第三方修改、二次打包或转发的副本，
+  均与本项目作者无关，作者一概不负责。
+  请遵守你所在地区的法律法规，以及所在网络（学校 / 公司 / 运营商）的使用条款。
+  <br><span class="tone-dim">使用前建议先点一次「保存健康基线」；回滚与恢复方法见项目的 SECURITY.md。</span>
+</footer>
+
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<div class="modal-mask" id="pwModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pwTitle" aria-describedby="pwHint">
+    <h3 id="pwTitle">需要管理员密码</h3>
+    <p id="pwHint">改路由表要 root。密码只用于本次 sudo，存在后端内存里、不写任何日志或文件。</p>
+    <input type="password" id="pwInput" placeholder="开机密码" autocomplete="off">
+    <div class="row">
+      <button id="pwCancel">取消</button>
+      <button class="primary" id="pwOk">验证并继续</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let scan = null;
+let pendingAction = null;
+let isWindows = false;
+let csrfToken = '';
+let lastScanAt = 0;
+
+const $ = id => document.getElementById(id);
+
+function toast(msg, ms = 3500) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._tm);
+  t._tm = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+const CAT_CLASS = { '企业VPN':'vpn', '开源VPN':'vpn', '系统VPN':'vpn',
+                    '代理':'proxy', '加速器':'acc', '覆盖网络':'net' };
+
+function chipCls(cat) { return CAT_CLASS[cat] || 'net'; }
+
+// 从 scan 结果取出 CSRF token，后续所有写请求必须带
+function syncToken(s) {
+  if (s && s.csrf_token) csrfToken = s.csrf_token;
+}
+
+function render(s) {
+  // 后端异常时 s 可能是 {error:...}；不守这一下，下面所有 .map 会直接抛异常
+  if (!s || s.error) {
+    toast('扫描失败：' + ((s && (s.message || s.error)) || '后端没有返回数据'), 6000);
+    return;
+  }
+  scan = s;
+  isWindows = s.platform === 'Windows';
+  syncToken(s);
+  lastScanAt = Date.now();
+  const rty = $('btnRetry'); if (rty) rty.style.display = 'none';
+
+  const badge = $('modeBadge');
+  badge.textContent = s.mode === 'direct' ? '✓ 本机直连'
+    : (s.mode === 'tunnel' ? '⚠ 隧道接管' : '◐ 混合');
+  badge.className = 'mode-badge ' +
+    (s.mode === 'direct' ? 'mode-direct' : s.mode === 'tunnel' ? 'mode-tunnel' : 'mode-mixed');
+
+  $('subText').textContent =
+    `自动识别本机所有 VPN / 加速器 / 代理(梯子) / 覆盖网络隧道（${s.platform}），一键切换。仅绑 127.0.0.1。`;
+
+  $('meta').innerHTML =
+    `物理出口 <b>${esc(s.phys_iface || '?')}</b> · 网关 <b>${esc(s.phys_gw || '?')}</b> · ` +
+    `默认路由走 <b>${esc(s.default_iface || '?')}</b>`;
+
+  // 概览指标：把关键状态从"一行文字"改成"一眼能扫读的格子"
+  const activeCnt = (s.bypass_active_ips || []).length;
+  const outCnt = (s.outlets || []).length;
+  const defaultIsPhys = !!s.default_iface && s.default_iface === s.phys_iface;
+  $('metrics').innerHTML = [
+    ['直连路由', s.direct_ip_count || 0, s.direct_ip_count ? 'tone-green' : 'tone-dim', '条'],
+    ['隧道路由', s.tunnel_ip_count || 0, s.tunnel_ip_count ? 'tone-red' : 'tone-green', '条'],
+    ['直连生效中', activeCnt, activeCnt ? 'tone-cyan' : 'tone-dim', '条'],
+    ['默认出口', defaultIsPhys ? '物理' : '隧道', defaultIsPhys ? 'tone-green' : 'tone-red', ''],
+    ['发现出口', outCnt, outCnt ? 'tone-purple' : 'tone-dim', '个'],
+  ].map(([k, v, tone, unit]) =>
+    `<div class="metric"><div class="k">${k}</div>` +
+    `<div class="v ${tone}">${esc(v)}${unit ? `<small> ${unit}</small>` : ''}</div></div>`
+  ).join('');
+
+  $('legend').innerHTML =
+    `<b>${s.bypass_active_ips.length}</b> 条直连路由生效中` +
+    (s.bypass_active_ips.length
+      ? ' · 点上面「↩ 交回隧道」可全部撤销' : '') +
+    (s.bypass_recovered
+      ? ' · <span style="color:var(--yellow)">注：这些是从路由表实测出来的（记录文件缺失），撤销不受影响</span>'
+      : '') +
+    (s.daemon_installed ? ' · <span style="color:var(--green)">守护已安装（30 秒自动补回）</span>' : '');
+
+  // 轻量体检的即时告警：路由表说的 ≠ 内核实际选的
+  const tw = $('truthWarn');
+  if (tw) {
+    const bad = (s.egress_truth || []).filter(x => x.mismatch);
+    if (bad.length) {
+      tw.style.display = '';
+      tw.innerHTML = '⚠ <b>检测到「路由表说的」和「实际走的」不一致</b> —— '
+        + bad.map(x => esc(x.label) + '：声明 ' + esc(x.declared_iface || '?')
+                     + ' → 实际 ' + esc(x.src_iface || '?')).join('；')
+        + '。这类问题看配置文件是看不出来的，建议到'
+        + '「<a href="#s-health">网络体检</a>」里做一次完整体检。';
+    } else {
+      tw.style.display = 'none';
+    }
+  }
+
+  // 当前情景
+  const sc = s.scene || {};
+  const sceneCls = { game: 'mode-tunnel', campus: 'mode-direct',
+                     direct: 'mode-direct', mixed: 'mode-mixed' }[sc.key] || 'mode-direct';
+  const sb = $('sceneBadge');
+  sb.textContent = sc.name || '未知';
+  sb.className = 'mode-badge ' + sceneCls;
+  $('sceneDesc').textContent = sc.desc || '';
+  const dirs = sc.directors || [];
+  $('sceneDirectors').innerHTML = dirs.length
+    ? '<div class="tbl-wrap"><table><thead><tr><th>承载公网的隧道</th><th>归属</th><th>命中探测点</th></tr></thead><tbody>'
+      + dirs.map(d => `<tr><td class="mono">${esc(d.iface)}</td><td>${esc(d.owner)}</td><td class="mono">${esc(d.hits)}</td></tr>`).join('')
+      + '</tbody></table></div>'
+    : '<div class="empty">当前没有隧道接口承载公网流量（全部走物理网卡）。</div>';
+
+  renderOutlets(s);
+  const oc = $('outletCount');
+  if (oc) oc.textContent = outCnt ? outCnt + ' 个出口' : '';
+
+  // Steam 体检：用 /api/scan 里的轻量摘要刷新概览（不含网络探测，不拖慢扫描）
+  renderSteam(s.steam);
+
+  // 检测到的软件
+  const sw = s.running_software || [];
+  $('softSkeleton').style.display = 'none';
+  const chips = $('softChips');
+  if (sw.length) {
+    chips.style.display = '';
+    chips.innerHTML = sw.map(x =>
+      `<span class="chip ${chipCls(x.cat)}">${x.name} · ${x.cat}</span>`).join('');
+  } else {
+    chips.style.display = '';
+    chips.innerHTML = '<div class="empty">未检测到已知隧道软件在运行。装好客户端并启动后，这里会列出它属于哪一类。</div>';
+  }
+
+  // 聚合路由抽查常量（与后端 PROBE_TARGETS 数量一致）
+  const PROBE_TOTAL = 12;
+
+  const showDaemon = s.platform === 'Darwin';
+  $('btnDaemonInstall').style.display = showDaemon ? '' : 'none';
+  $('btnDaemonRemove').style.display = showDaemon ? '' : 'none';
+  $('btnDaemonInstall').disabled = s.daemon_installed;
+  $('btnDaemonRemove').disabled = !s.daemon_installed;
+
+  $('btnApply').disabled = s.mode === 'direct' && s.tunnel_ip_count === 0;
+  $('btnUndo').disabled = s.bypass_active_ips.length === 0;
+
+  // 接口表（v2：显示 MTU 与 ULA 指纹）
+  $('ifaceSkeleton').style.display = 'none';
+  const it = $('ifaceTable');
+  const ifaces = s.interfaces || [];
+  const dsum = $('diagSummary');
+  if (dsum) dsum.textContent = ifaces.length + ' 个接口 · ' + (s.running_software || []).length + ' 个客户端在跑';
+  it.style.display = '';
+  it.querySelector('thead').innerHTML = '<tr><th>接口</th><th>类型</th><th>归属</th><th>IPv4</th><th>MTU</th><th>状态</th><th>备注</th></tr>';
+  it.querySelector('tbody').innerHTML = ifaces.length ? ifaces.map(i => {
+    const isTun = i.kind === '隧道';
+    const ownerTag = isTun
+      ? `<span class="tag tag-tunnel">${esc(i.owner)}</span>`
+      : (i.is_phys ? `<span class="tag tag-info">${esc(i.owner)}</span>`
+                   : `<span class="tag tag-dim">${esc(i.owner)}</span>`);
+    const note = i.is_default ? '<span class="tag tag-bad">承载默认路由</span>'
+              : i.is_phys ? '<span class="tag tag-ok">系统出口</span>' : '';
+    const ula = i.ipv6_ula ? `<div class="ns tone-purple">ULA: ${esc(i.ipv6_ula)}</div>` : '';
+    const dash = '<span class="tone-dim">—</span>';
+    return `<tr>
+      <td class="mono">${esc(i.name)}${i.desc ? `<div class="ns tone-dim">${esc(i.desc)}</div>` : ''}${ula}</td>
+      <td>${esc(i.kind)}</td>
+      <td>${ownerTag}</td>
+      <td class="mono">${esc(i.ipv4) || dash}</td>
+      <td class="mono">${esc(i.mtu) || dash}</td>
+      <td>${esc(i.status) || dash}</td>
+      <td>${note}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">未检测到网络接口。</td></tr>';
+
+  // 聚合路由多点抽查
+  const tp = s.tunnel_probe || {};
+  const tpKeys = Object.keys(tp);
+  if (tpKeys.length && $('probeCard')) {
+    $('probeCard').style.display = '';
+    $('probeBody').innerHTML = tpKeys.map(k =>
+      `<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(tp[k])} / ${PROBE_TOTAL}</td>` +
+      `<td><span class="tag tag-bad">疑似聚合路由隐性接管</span></td></tr>`).join('');
+  } else if ($('probeCard')) {
+    $('probeCard').style.display = 'none';
+  }
+
+  // 域名路由表
+  $('domSkeleton').style.display = 'none';
+  const dt = $('domTable');
+  const doms = s.domains || [];
+  dt.style.display = '';
+  dt.querySelector('tbody').innerHTML = doms.length ? doms.flatMap(d => {
+    if (!d.ips.length) return [`<tr><td class="mono">${esc(d.domain)}</td><td colspan="3" class="empty">无法解析</td></tr>`];
+    return d.ips.map((e, idx) => `<tr>
+      <td class="mono">${idx === 0 ? esc(d.domain) : ''}</td>
+      <td class="mono">${esc(e.ip)}</td>
+      <td class="mono">${esc(e.iface) || '?'}</td>
+      <td>${e.direct
+        ? '<span class="tag tag-ok">直连 ✓</span>'
+        : e.tunnel
+          ? '<span class="tag tag-bad">被隧道接管</span>'
+          : '<span class="tag tag-dim">其他路径</span>'}</td></tr>`);
+  }).join('') : '<tr><td colspan="4" class="empty">域名列表为空 —— 在下面「需要直连的域名列表」里加几个。</td></tr>';
+
+  if (!($('domainEditor').dataset.dirty)) {
+    $('domainEditor').value = (s.domains_config || []).join('\n');
+  }
+
+  // 隧道客户端自身服务器 IP：本工具不托管它们（加了也没意义，误删会搞断隧道）
+  const excl = s.excluded_vpn_ips || [];
+  const box = $('vpnExclBox');
+  if (excl.length) {
+    box.style.display = '';
+    box.innerHTML =
+      `🛡 已自动排除隧道客户端<b>自身服务器</b>：<span class="mono">${esc(excl.join('、'))}</span><br>` +
+      `这些 IP 是 VPN/加速器的「保活通路」终点。「切到本机直连」不会给它们加路由，` +
+      `「交回隧道」也不会去删它们的路由 —— 避免误伤导致隧道本身断掉。`;
+  } else {
+    box.style.display = 'none';
+  }
+
+  // ---- 自动追踪面板 ----
+  const autoOn = !!s.auto_enabled;
+  $('btnAutoEnable').disabled = autoOn;
+  $('btnAutoDisable').disabled = !autoOn;
+  const acnt = $('autoCount');
+  if (acnt) acnt.textContent = autoOn ? '追踪中 · ' + (s.auto_domains || []).length + ' 个' : '未开启';
+  $('autoChips').innerHTML = (s.auto_domains || []).length
+    ? s.auto_domains.map(d => `<span class="chip net">${esc(d)}</span>`).join('')
+    : '<div class="empty">暂无正在追踪的网站 — 开着之后新开的网页会自动出现在这里（约 30 秒延迟）</div>';
+
+  // 自动域名的路由走向也并入主表展示
+  if (s.auto_rows && s.auto_rows.length) {
+    const dt = $('domTable');
+    s.auto_rows.forEach(d => {
+      if (!d.ips.length) {
+        dt.querySelector('tbody').insertAdjacentHTML('beforeend',
+          `<tr><td class="mono">${esc(d.domain)} <span class="tag tag-dim">自动</span></td><td colspan="3" class="empty">无法解析</td></tr>`);
+        return;
+      }
+      d.ips.forEach((e, idx) => {
+        dt.querySelector('tbody').insertAdjacentHTML('beforeend',
+          `<tr style="opacity:.78">
+            <td class="mono">${idx === 0 ? esc(d.domain) + ' <span class="tag tag-dim">自动</span>' : ''}</td>
+            <td class="mono">${esc(e.ip)}</td>
+            <td class="mono">${esc(e.iface) || '?'}</td>
+            <td>${e.direct ? '<span class="tag tag-ok">直连 ✓</span>'
+              : e.tunnel ? '<span class="tag tag-bad">被隧道接管</span>'
+              : '<span class="tag tag-dim">其他路径</span>'}</td></tr>`);
+      });
+    });
+  }
+}
+
+// 一次扫描要跑好几秒（网络接口 + 路由表 + 多点抽查 + DNS + 指纹匹配），
+// 没有反馈会让人以为卡死了 —— 所以给个进度条 + 阶段提示 + 计时。
+const SCAN_PHASES = [
+  [0,    '扫描网络接口与进程'],
+  [900,  '读取路由表与出口'],
+  [2200, '多点抽查公网出口'],
+  [3900, '解析目标域名'],
+  [5600, '匹配隧道归属指纹'],
+  [8000, '收尾'],
+];
+let scanBusy = false;
+let scanTimer = null;
+let scanStartedAt = 0;
+let firstScanDone = false;
+const SCAN_MIN_SHOW = 420;   // 最快也要让进度条露个脸，避免一闪而过
+
+function beginScan(verbose) {
+  const bar = $('scanBar'), tip = $('scanTip');
+  if (!bar || !tip) return;
+  scanStartedAt = Date.now();
+  bar.style.display = '';
+  if (!verbose) { tip.style.display = 'none'; return; }
+  tip.style.display = '';
+  if ($('navWho')) $('navWho').style.display = 'none';   // 扫描时让位给阶段提示
+  const tick = () => {
+    const ms = Date.now() - scanStartedAt;
+    let label = SCAN_PHASES[0][1];
+    for (const [at, txt] of SCAN_PHASES) { if (ms >= at) label = txt; }
+    const el = $('scanTipText');
+    if (el) el.textContent = label + '…  ' + (ms / 1000).toFixed(1) + 's';
+  };
+  tick();
+  scanTimer = setInterval(tick, 120);
+}
+
+function endScan() {
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  const bar = $('scanBar'), tip = $('scanTip');
+  const elapsed = Date.now() - scanStartedAt;
+  const wait = Math.max(0, SCAN_MIN_SHOW - elapsed);
+  setTimeout(() => {
+    if (bar) bar.style.display = 'none';
+    if (tip) tip.style.display = 'none';
+    const w = $('navWho'); if (w) w.style.display = '';
+  }, wait + 380);
+}
+
+async function refresh(opts) {
+  const verbose = !opts || opts.verbose !== false;
+  if (scanBusy) return;            // 防重入：定时刷新撞上手动刷新时直接跳过
+  scanBusy = true;
+  beginScan(verbose || !firstScanDone);
+  try {
+    render(await (await fetch('/api/scan')).json());
+    firstScanDone = true;
+  } catch (e) {
+    const rty = $('btnRetry'); if (rty) rty.style.display = '';
+    if (verbose) toast('扫描失败：' + e.message);
+  } finally {
+    scanBusy = false;
+    endScan();
+  }
+}
+
+async function postJson(path, body = {}, signal) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-TM-Token': csrfToken       // CSRF 防护：跨域简单请求带不了自定义头
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+  return [r, await r.json()];
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderOutlets(s) {
+  const outs = s.outlets || [];
+  const last = s.active_outlet;
+  const box = $('outletList');
+  if (!outs.length) {
+    box.innerHTML = '<div class="empty">没有发现可管理的出口（本机需要装有隧道客户端）。</div>';
+    return;
+  }
+  const rows = outs.map(o => {
+    const isDirect = o.key === '__direct__';
+    let state;
+    if (o.in_use) state = '<span class="tone-green">正在使用</span>';
+    else if (last === o.key) state = '<span class="tone-yellow">已切换（待确认）</span>';
+    else if (o.running) state = '进程在跑';
+    else state = '<span class="tone-dim">未运行</span>';
+    if (o.confirmed) state += ` <span class="ns tone-dim">· 已记住 ${o.fp_routes || 0} 条路由特征</span>`;
+
+    const pending = (!o.in_use && last === o.key);   // 黄字「已切换（待确认）」这一行
+    const btns = [];
+    if (pending) {
+      // 已经切过去了，再摆一个绿色「切到这里」毫无意义 —— 该给的是「反悔」。
+      // 注意要覆盖「本机直连」：它的 key 是 __direct__，同样会有这笔待确认记录。
+      btns.push(`<button class="warn" data-undo="${esc(o.key)}">✕ 取消这次切换</button>`);
+      if (!isDirect && !o.confirmed) {
+        // 这里刻意**不给绿色**：绿色只留给「切到这里」这种前进动作。
+        // 「待确认」时用户的主操作是反悔，「确认归属」只是个次要的学习动作。
+        btns.push(`<button data-id="${esc(o.key)}">确认归属</button>`);
+      }
+    } else if (!o.in_use) {
+      btns.push(`<button class="primary" data-sw="${esc(o.key)}">切到这里</button>`);
+    }
+    if (o.in_use && o.can_stop && !isDirect) btns.push(`<button data-stop="${esc(o.key)}">停止</button>`);
+    if (!o.running && o.can_start && !isDirect && !o.in_use) btns.push(`<button data-start="${esc(o.key)}">启动</button>`);
+    if (!isDirect && !o.confirmed && !pending) btns.push(`<button data-id="${esc(o.key)}">确认归属</button>`);
+    if (o.confirmed) btns.push(`<button data-forget="${esc(o.key)}">遗忘记忆</button>`);
+    if (!btns.length) btns.push('<span class="tone-dim">—</span>');
+
+    return '<tr>'
+      + `<td><b>${esc(o.name)}</b><div class="ns tone-dim">${esc(o.hint)}</div></td>`
+      + `<td>${esc(o.cat)}</td><td>${state}</td>`
+      + `<td style="white-space:nowrap">${btns.join(' ')}</td></tr>`;
+  }).join('');
+
+  box.innerHTML = '<div class="tbl-wrap"><table><thead><tr><th>出口</th><th>类别</th><th>状态</th><th>操作</th></tr></thead>'
+    + '<tbody>' + rows + '</tbody></table></div>';
+}
+
+async function switchOutlet(path, key, name) {
+  const box = $('sceneSteps');
+  const label = name || key;
+  const ac = new AbortController();
+  let settled = false;
+
+  const closeBox = () => { box.innerHTML = ''; };
+
+  const showClose = (innerHtml) => {
+    box.innerHTML = `<div class="ops-row"><div>${innerHtml}</div>`
+      + `<button class="primary" data-ops-close>✓ 关闭</button></div>`;
+    box.querySelector('[data-ops-close]').onclick = closeBox;
+  };
+
+  box.innerHTML = `<div class="ops-row"><div class="sub">执行中…</div>`
+    + `<button class="warn" data-ops-cancel>✕ 取消</button></div>`;
+  box.querySelector('[data-ops-cancel]').onclick = () => {
+    if (settled) { closeBox(); return; }
+    ac.abort();
+    box.innerHTML = `<div class="ops-row"><div class="sub">`
+      + `已停止等待。<b>后端可能仍会完成已经开始的动作</b> —— 点顶部「↻ 重新扫描」看当前真实状态。</div>`
+      + `<button data-ops-close>知道了</button></div>`;
+    box.querySelector('[data-ops-close]').onclick = closeBox;
+    toast('已停止等待');
+  };
+
+  try {
+    const [r, j] = await postJson(path, { key }, ac.signal);
+    settled = true;
+    if (r.status === 403 && (j.error === 'NEED_SUDO' || j.error === 'BAD_PASSWORD')) {
+      box.innerHTML = `<div class="ops-row"><div class="sub">`
+        + `需要管理员密码才能停 / 启隧道客户端</div>`
+        + `<button class="warn" data-ops-close>✕ 取消</button></div>`;
+      box.querySelector('[data-ops-close]').onclick = () => { closeBox(); pendingAction = null; };
+      askPassword({ path, label: '操作「' + label + '」', body: { key } });
+      return;
+    }
+    const res = j.identify || j.outlet || {};
+    let html = j.message ? '<div class="sub"><b>' + esc(j.message) + '</b></div>' : '';
+    (res.done || []).forEach(d => {
+      html += '<div class="sub">' + (d.ok ? '✓ ' : '✗ ') + esc(d.name) + ' · '
+        + esc(d.detail) + '</div>';
+    });
+    (res.owned_ifaces || []).forEach(f => {
+      html += '<div class="sub">· 接口 ' + esc(f) + ' 属于它</div>';
+    });
+    (res.owned_routes || []).forEach(r2 => {
+      html += '<div class="sub">· 路由 ' + esc(r2) + ' 属于它</div>';
+    });
+    (res.manual || []).forEach(m => { html += '<div class="sub">· ' + esc(m) + '</div>'; });
+    showClose(html || '<div class="sub">完成</div>');
+    toast(j.message || (label + ' 完成'));
+    if (j.result) render(j.result); else setTimeout(refresh, 1200);
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;     // 用户自己按的取消，不当作错误
+    settled = true;
+    showClose('<div class="sub">出错：' + esc((e && e.message) || e) + '</div>');
+  }
+}
+
+async function doAction(path, label) {
+  toast(label + ' 执行中…', 1500);
+  try {
+    const [r, j] = await postJson(path);
+    if (r.status === 403 && j.error === 'NEED_SUDO') {
+      askPassword({ path, label }); return;
+    }
+    if (r.status === 403 && j.error === 'BAD_PASSWORD') {
+      toast('密码错误，请重试'); askPassword({ path, label }); return;
+    }
+    if (r.status === 403 && (j.error === 'FORBIDDEN_ORIGIN' || j.error === 'BAD_CSRF_TOKEN')) {
+      toast('安全校验失败：' + (j.message || j.error) + '，请刷新页面重试', 6000);
+      refresh(); return;
+    }
+    if (r.ok) {
+      toast(j.message || (label + ' 完成 ✓'));
+      if (j.result) render(j.result); else refresh();
+      return;
+    }
+    toast(label + '失败：' + (j.message || j.error || '未知错误'), 6000);
+  } catch (e) {
+    toast(label + '出错：' + e.message);
+  }
+}
+
+$('btnApply').onclick = () => {
+  if (isWindows) toast('Windows 将弹出 UAC 确认框，点是即可', 4000);
+  doAction('/api/apply', '切换到本机直连');
+};
+
+$('btnUndo').onclick = () => {
+  if (isWindows) toast('Windows 将弹出 UAC 确认框，点是即可', 4000);
+  doAction('/api/undo', '交回隧道');
+};
+$('btnDaemonInstall').onclick = async () => {
+  if (!confirm('装守护会新增 LaunchDaemon 并写入 /usr/local/bin，属于系统配置改动。确认继续？')) return;
+  doAction('/api/daemon/install', '安装守护');
+};
+$('btnDaemonRemove').onclick = () => doAction('/api/daemon/remove', '卸载守护');
+$('btnRescan').onclick = () => refresh({ verbose: true });
+$('outletList').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.sw) switchOutlet('/api/outlet/switch', b.dataset.sw);
+  else if (b.dataset.undo) switchOutlet('/api/outlet/cancel', b.dataset.undo, '取消这次切换');
+  else if (b.dataset.stop) switchOutlet('/api/outlet/stop', b.dataset.stop);
+  else if (b.dataset.start) switchOutlet('/api/outlet/start', b.dataset.start);
+  else if (b.dataset.id) switchOutlet('/api/outlet/identify', b.dataset.id);
+  else if (b.dataset.forget) switchOutlet('/api/outlet/forget', b.dataset.forget, '遗忘记忆');
+});
+
+$('domainEditor').addEventListener('input', () => {
+  $('domainEditor').dataset.dirty = '1';
+});
+$('btnSaveDomains').onclick = async () => {
+  const domains = $('domainEditor').value.split('\n').map(x => x.trim()).filter(Boolean);
+  if (!domains.length) { toast('域名列表不能为空'); return; }
+  toast('保存中…', 1500);
+  try {
+    const [r, j] = await postJson('/api/config', { domains });
+    if (r.ok) {
+      delete $('domainEditor').dataset.dirty;
+      toast('已保存并重新扫描 ✓');
+      if (j.result) render(j.result); else refresh();
+    } else toast('保存失败：' + (j.message || j.error));
+  } catch (e) { toast('保存出错：' + e.message); }
+};
+$('btnResetDomains').onclick = async () => {
+  if (!confirm('恢复为默认域名表？')) return;
+  $('domainEditor').value = ['www.baidu.com','www.bing.com',
+    'github.com','www.zhihu.com'].join('\n');
+};
+
+// ---- 自动追踪 ----
+$('btnAutoEnable').onclick = () => doAction('/api/auto/enable', '开启自动追踪');
+$('btnAutoDisable').onclick = () => doAction('/api/auto/disable', '关闭自动追踪');
+$('btnQuickAdd').onclick = async () => {
+  const raw = $('quickDomainInput').value.trim();
+  if (!raw) { toast('先输入一个域名，如 www.example.com'); return; }
+  // 简单清洗：去掉协议头和路径，只保留主机名
+  let d = raw.replace(/^[a-zA-Z]+:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d)) { toast('域名格式不对，检查一下：' + d); return; }
+  toast('加入追踪中…', 1500);
+  try {
+    const [r, j] = await postJson('/api/auto/pin', { domain: d });
+    if (r.ok) {
+      $('quickDomainInput').value = '';
+      toast(j.message || '已加入追踪 ✓');
+      if (j.result) render(j.result); else refresh();
+    } else toast('加入失败：' + (j.message || j.error));
+  } catch (e) { toast('加入出错：' + e.message); }
+};
+$('quickDomainInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnQuickAdd').click(); });
+
+function askPassword(action) {
+  pendingAction = action;
+  $('pwTitle').textContent = '需要管理员密码';
+  $('pwHint').textContent = '改路由表要 root。密码只用于本次 sudo，存在后端内存里、不写任何日志或文件。';
+  $('pwInput').value = '';
+  $('pwModal').classList.add('show');
+  setTimeout(() => $('pwInput').focus(), 50);
+}
+
+$('pwOk').onclick = async () => {
+  const pw = $('pwInput').value;
+  $('pwModal').classList.remove('show');
+  try {
+    const r = await fetch('/api/sudo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-TM-Token': csrfToken },
+      body: JSON.stringify({ password: pw })
+    });
+    const j = await r.json();
+    if (!j.ok) { toast('密码验证失败：' + j.message); return; }
+    toast('密码已验证，继续执行…');
+  } catch (e) { toast('验证出错：' + e.message); return; }
+  if (pendingAction) {
+    const { path, label, body } = pendingAction;
+    pendingAction = null;
+    try {
+      const [r2, j2] = await postJson(path, body || {});
+      if (r2.ok) {
+        toast(j2.message || (label + ' 完成 ✓'));
+        if (j2.rescue) renderRescue(j2);          // 应急恢复：走它自己的结果视图
+        else if (j2.result) render(j2.result);
+        else refresh();
+      } else toast(label + '失败：' + (j2.message || j2.error), 6000);
+    } catch (e) { toast(label + '出错：' + e.message); }
+  }
+};
+$('pwCancel').onclick = () => { $('pwModal').classList.remove('show'); pendingAction = null; };
+$('pwInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('pwOk').click(); });
+
+// Esc 关闭 / 点遮罩关闭（可访问性：模态框要能"逃出去"）
+function closePwModal() { $('pwModal').classList.remove('show'); pendingAction = null; }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('pwModal').classList.contains('show')) closePwModal();
+});
+$('pwModal').addEventListener('mousedown', e => {
+  if (e.target === $('pwModal')) closePwModal();
+});
+
+refresh({ verbose: true });
+setInterval(() => refresh({ verbose: false }), 20000);
+
+// CSRF token 失效时自动刷新页面重新获取
+window.addEventListener('focus', () => {
+  if (!csrfToken) refresh();
+});
+
+/* ==========================================================
+   顶栏：当前分区高亮 + "更新于 X" + 失败重试
+   ========================================================== */
+const navLinks = Array.from(document.querySelectorAll('.nav-a'));
+const navSecs = navLinks
+  .map(a => document.querySelector(a.getAttribute('href')))
+  .filter(Boolean);
+
+function syncNav() {
+  if (!navSecs.length) return;
+  const y = window.scrollY + 130;          // 130 = 导航条高度 + 一点余量
+  let cur = navSecs[0];
+  for (const s of navSecs) { if (s.offsetTop <= y) cur = s; }
+  navLinks.forEach(a => {
+    const on = a.getAttribute('href') === '#' + cur.id;
+    a.classList.toggle('on', on);
+    if (on) a.setAttribute('aria-current', 'true');
+    else a.removeAttribute('aria-current');
+  });
+}
+document.addEventListener('scroll', syncNav, { passive: true });
+window.addEventListener('resize', syncNav);
+syncNav();
+
+function fmtAgo(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 5) return '刚刚更新';
+  if (s < 60) return '更新于 ' + s + ' 秒前';
+  const m = Math.floor(s / 60);
+  if (m < 60) return '更新于 ' + m + ' 分钟前';
+  return '更新于 ' + Math.floor(m / 60) + ' 小时前';
+}
+setInterval(() => {
+  const w = $('navWho');
+  if (w && lastScanAt) w.textContent = fmtAgo(Date.now() - lastScanAt);
+}, 1000);
+
+const retryBtn = $('btnRetry');
+if (retryBtn) retryBtn.onclick = () => refresh({ verbose: true });
+
+/* ==========================================================
+   复制诊断信息：贴一段纯文本就能把环境说清楚
+   ========================================================== */
+function diagText() {
+  const s = scan || {};
+  const L = [];
+  L.push('【通用隧道管理 · 诊断信息】');
+  L.push('导出时间: ' + new Date().toLocaleString());
+  L.push('平台: ' + (s.platform || '?') + '   模式: ' + (s.mode || '?'));
+  L.push('物理出口: ' + (s.phys_iface || '?') + ' / 网关 ' + (s.phys_gw || '?') +
+         '   默认路由走: ' + (s.default_iface || '?'));
+  L.push('路由统计: 直连 ' + (s.direct_ip_count || 0) + ' 条 · 隧道 ' +
+         (s.tunnel_ip_count || 0) + ' 条 · 直连生效 ' + ((s.bypass_active_ips || []).length) + ' 条');
+
+  const sc = s.scene || {};
+  L.push('当前情景: ' + (sc.name || '?') + '（' + (sc.key || '?') + '）');
+  const dirs = sc.directors || [];
+  if (dirs.length) {
+    L.push('  承载公网的隧道: ' + dirs.map(x => x.iface + '→' + x.owner + '(' + x.hits + '点)').join(', '));
+  }
+
+  const outs = s.outlets || [];
+  if (outs.length) {
+    L.push('出口列表:');
+    outs.forEach(o => L.push('  - ' + o.name + ' [' + o.cat + '] ' +
+      (o.in_use ? '正在使用' : (o.running ? '进程在跑' : '未运行')) +
+      (o.confirmed ? ' · 已记住归属' : '')));
+  }
+
+  const tp = s.tunnel_probe || {};
+  const tk = Object.keys(tp);
+  if (tk.length) {
+    L.push('聚合路由抽查命中（疑似隐性接管）:');
+    tk.forEach(k => L.push('  - ' + k + ': ' + tp[k] + '/12'));
+  }
+
+  const ex = s.excluded_vpn_ips || [];
+  if (ex.length) L.push('已排除的隧道自身服务器 IP: ' + ex.join(', '));
+
+  const sw = s.running_software || [];
+  if (sw.length) L.push('检测到的客户端: ' + sw.map(x => x.name + '(' + x.cat + ')').join('、'));
+
+  const doms = s.domains || [];
+  if (doms.length) {
+    L.push('域名路由:');
+    doms.forEach(d => {
+      if (!d.ips || !d.ips.length) { L.push('  - ' + d.domain + ': 无法解析'); return; }
+      d.ips.forEach(e => L.push('  - ' + d.domain + ' → ' + e.ip + ' via ' + (e.iface || '?') +
+        (e.direct ? ' [直连]' : e.tunnel ? ' [被隧道接管]' : ' [其他]')));
+    });
+  }
+  return L.join('\n');
+}
+
+const diagBtn = $('btnDiag');
+if (diagBtn) diagBtn.onclick = async () => {
+  const txt = diagText();
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('诊断信息已复制到剪贴板 ✓');
+  } catch (e) {
+    // 非安全上下文或权限被拒时的兜底
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    ta.remove();
+    toast(ok ? '诊断信息已复制 ✓' : '复制失败，请手动选中页面内容复制', 5000);
+  }
+};
+
+/* ==========================================================
+   网络体检：真解析 / 真连接 / 真看第一跳
+   ========================================================== */
+const traceBtn = $('btnTrace');
+if (traceBtn) traceBtn.onclick = async () => {
+  const box = $('traceOut');
+  box.innerHTML = '<div class="skel"><span class="spin">◐</span> 正在体检：真解析一次、真连一次、真看第一跳…</div>';
+  try {
+    const [r, j] = await postJson('/api/trace');
+    if (!j.ok) { box.innerHTML = '<div class="empty">' + esc(j.error || '体检失败') + '</div>'; return; }
+    renderTrace(j.trace);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">体检出错：' + esc(e.message || e) + '</div>';
+  }
+};
+
+function renderTrace(t) {
+  const box = $('traceOut');
+  if (!t || t.error) {
+    box.innerHTML = '<div class="empty">' + esc((t && t.error) || '没有数据') + '</div>';
+    return;
+  }
+  const ok = !!t.clean;
+
+  let h = '<div class="verdict ' + (ok ? 'ok' : 'bad') + '">'
+    + '<span class="ico">' + (ok ? '✓' : '⚠') + '</span><div>'
+    + '<b>' + (ok ? '流量走向正常' : '发现异常') + '</b>'
+    + '<div class="txt">' + esc(t.summary) + '</div>'
+    + '<div class="dt">耗时 ' + t.elapsed_ms + ' ms · 物理出口 '
+    + esc(t.phys_iface || '?') + ' · 默认路由 ' + esc(t.default_iface || '?') + '</div>'
+    + '</div></div>';
+
+  if ((t.issues || []).length) {
+    h += '<ul class="issue-list">' + t.issues.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+  }
+
+  // ---- 面板 1：路由（声明 vs 实测）----
+  h += '<div class="panel-title">路由：路由表说的 vs 实际走的</div>'
+    + '<div class="tbl-wrap"><table><thead><tr>'
+    + '<th>目标</th><th>声明出口</th><th>内核实际选的源地址</th><th>第一跳</th><th>判定</th>'
+    + '</tr></thead><tbody>'
+    + (t.routes || []).map(r => '<tr>'
+      + '<td><b>' + esc(r.label) + '</b><div class="ns mono tone-dim">' + esc(r.ip) + '</div></td>'
+      + '<td class="mono">' + esc(r.declared_iface || '—') + '</td>'
+      + '<td class="mono">' + esc(r.src_ip || '—')
+      + (r.src_iface ? '<div class="ns tone-dim">' + esc(r.src_iface) + '</div>' : '') + '</td>'
+      + '<td class="mono">' + esc(r.first_hop || '—') + '</td>'
+      + '<td>' + (r.mismatch ? '<span class="tag tag-bad">不一致</span>'
+                             : '<span class="tag tag-ok">一致</span>') + '</td></tr>').join('')
+    + '</tbody></table></div>';
+
+  // ---- 面板 2：DNS ----
+  h += '<div class="panel-title">DNS：系统解析 vs 绕过系统直查</div>'
+    + '<div class="tbl-wrap"><table><thead><tr>'
+    + '<th>域名</th><th>系统解析</th><th>直查（'
+    + esc((t.dns_query_used || []).join('、')) + '）</th><th>判定</th>'
+    + '</tr></thead><tbody>'
+    + (t.dns || []).map(d => {
+        const dq = (d.direct || []).map(x => (x.ips || []).length
+          ? x.ips.join('、') : (x.rcode === null ? '无响应' : '空')).join(' ／ ');
+        let tag = '<span class="tag tag-ok">正常</span>';
+        if ((d.fake_ips || []).length) tag = '<span class="tag tag-bad">假 IP 池</span>';
+        else if (!(d.sys_ips || []).length) tag = '<span class="tag tag-bad">解析失败</span>';
+        else if (d.disagree) tag = '<span class="tag tag-warn">与直查不一致</span>';
+        return '<tr><td class="mono">' + esc(d.domain) + '</td>'
+          + '<td class="mono">' + ((d.sys_ips || []).length
+              ? esc(d.sys_ips.join('、')) : '<span class="tone-red">失败</span>') + '</td>'
+          + '<td class="mono">' + esc(dq) + '</td><td>' + tag + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>';
+
+  if (t.dns_overridden) {
+    h += '<div class="verdict warn" style="margin-top:10px">'
+      + '<span class="ico">!</span><div><b>DNS 已被覆盖</b>'
+      + '<div class="txt">系统在用的 DNS（' + esc((t.dns_now || []).join('、'))
+      + '）和物理网络 DHCP 给的（' + esc((t.dns_dhcp || []).join('、'))
+      + '）完全不同 —— 多半是隧道客户端改的。</div></div></div>';
+  }
+
+  // ---- 面板 3：连通性 ----
+  h += '<div class="panel-title">连通性（照 DNS 结果真连一次 443）</div>'
+    + '<div class="tbl-wrap"><table><thead><tr>'
+    + '<th>网站</th><th>解析到的 IP</th><th>连通</th><th>延迟</th><th>第一跳</th>'
+    + '</tr></thead><tbody>'
+    + (t.conns || []).map(c => (c.ips || []).length
+        ? c.ips.map((e, i) => '<tr>'
+            + '<td class="mono">' + (i === 0 ? esc(c.domain) : '') + '</td>'
+            + '<td class="mono">' + esc(e.ip) + '</td>'
+            + '<td>' + (e.ok ? '<span class="tag tag-ok">通</span>'
+                             : '<span class="tag tag-bad">不通</span>') + '</td>'
+            + '<td class="mono">' + (e.ms == null ? '—' : e.ms + ' ms') + '</td>'
+            + '<td class="mono">' + esc(e.first_hop || '—') + '</td></tr>').join('')
+        : '<tr><td class="mono">' + esc(c.domain)
+          + '</td><td colspan="4" class="empty">解析不到 IP，没法连</td></tr>').join('')
+    + '</tbody></table></div>';
+
+  if ((t.notes || []).length) {
+    h += '<ul class="note-list"><li>' + t.notes.map(esc).join('</li><li>') + '</li></ul>';
+  }
+  box.innerHTML = h;
+}
+
+/* ==========================================================
+   一键应急恢复
+   ========================================================== */
+const rescueBtn = $('btnRescue');
+if (rescueBtn) rescueBtn.onclick = () => {
+  const go = confirm(
+    '一键应急恢复会依次做这些事：\n\n' +
+    '  1  把默认路由改回物理网关\n' +
+    '  2  清理指向已消失接口的黑洞路由\n' +
+    '  3  清除假 IP 池路由（198.18.x 等）\n' +
+    '  4  把 DNS 恢复为干净值\n' +
+    '  5  刷新 DNS 缓存\n\n' +
+    '这会改动系统网络设置，需要管理员密码，过程中网络会短暂中断。\n' +
+    '不会卸载任何软件，也不会删你的配置文件。\n\n确认继续？');
+  if (!go) return;
+  doRescue();
+};
+
+async function doRescue() {
+  const box = $('rescueOut');
+  box.innerHTML = '<div class="skel"><span class="spin">◐</span> 正在应急恢复…</div>';
+  try {
+    const [r, j] = await postJson('/api/rescue');
+    if (r.status === 403 && j.error === 'NEED_SUDO') {
+      box.innerHTML = '<div class="sub">需要管理员密码才能改路由和 DNS</div>';
+      askPassword({ path: '/api/rescue', label: '一键应急恢复' });
+      return;
+    }
+    renderRescue(j);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">恢复出错：' + esc(e.message || e) + '</div>';
+  }
+}
+
+function renderRescue(j) {
+  const box = $('rescueOut');
+  const res = j.rescue || {};
+  let h = '<div class="verdict ' + (j.ok ? 'ok' : 'bad') + '">'
+    + '<span class="ico">' + (j.ok ? '✓' : '⚠') + '</span><div>'
+    + '<b>' + esc(j.message || '') + '</b>';
+  if (res.before) {
+    h += '<div class="dt">恢复前：默认路由 '
+      + esc((res.before.default_route || []).join(' / ')) + ' · DNS '
+      + esc((res.before.dns || []).join('、') || '(空)') + '</div>';
+  }
+  if (res.after) {
+    h += '<div class="dt">恢复后：默认路由 '
+      + esc((res.after.default_route || []).join(' / ')) + ' · DNS '
+      + esc((res.after.dns || []).join('、') || '(空)') + '</div>';
+  }
+  if (res.verify) {
+    h += '<div class="dt">复验：外网' + (res.verify.tcp_ok ? '可连通' : '仍不通')
+      + '（' + (res.verify.tcp_ms == null ? '—' : res.verify.tcp_ms + ' ms') + '）· DNS '
+      + (res.verify.dns_ok ? '解析正常' : '仍失败') + '</div>';
+  }
+  h += '</div></div>';
+
+  if ((res.steps || []).length) {
+    h += '<ul class="steps">' + res.steps.map(s =>
+      '<li><span class="mark ' + (s.ok ? 'tone-green' : 'tone-yellow') + '">'
+      + (s.ok ? '✓' : '·') + '</span><div>'
+      + '<div class="nm">' + esc(s.name) + '</div>'
+      + '<div class="dt">' + esc(s.detail) + '</div></div></li>').join('') + '</ul>';
+  }
+  if ((res.manual || []).length) {
+    h += '<ul class="note-list"><li>' + res.manual.map(esc).join('</li><li>') + '</li></ul>';
+  }
+  box.innerHTML = h;
+  if (j.ok) { toast('应急恢复完成'); setTimeout(refresh, 1500); }
+}
+
+/* ==========================================================
+   保存健康基线
+   ========================================================== */
+const saveHealthBtn = $('btnSaveHealth');
+if (saveHealthBtn) saveHealthBtn.onclick = async () => {
+  toast('保存中…', 1500);
+  try {
+    const [r, j] = await postJson('/api/health/save');
+    if (r.ok) {
+      toast(j.message || '健康基线已保存 ✓');
+      if (j.result) render(j.result); else refresh();
+    } else toast('保存失败：' + (j.message || j.error), 6000);
+  } catch (e) { toast('保存出错：' + (e.message || e)); }
+};
+
+/* ==========================================================
+   Steam 体检
+   ----------------------------------------------------------
+   Steam 是三张互不相干的网，所以这里分三块看：
+     平台网    WebSocket 443  → CM 集群      → 联机延迟
+     游戏联机网 UDP 27015–27060 → SDR 中继    → 联机稳不稳
+     内容分发网 HTTP          → CellID 的 CDN → 下载走哪条路、多快
+
+   两条自我约束（写进代码，不靠自觉）：
+     1. ICMP 一律标注为「网络层参考值」——SDR 走 UDP 且有自己的握手，
+        中继不回 ICMP 不代表游戏连不上，绝不冒充游戏延迟。
+     2. 不做「自动测速」。Steam 的下载分片要 depot key 才拉得到，
+        拿不到确定大小的文件，硬凑一个 Mbps 出来是假的；
+        真速度只认「边下边采」。所以下面的速率全部来自 nettop 实测。
+   ========================================================== */
+
+let capPollTimer = null;
+
+function steamErr(msg) {
+  const box = $('steamErr');
+  if (!box) return;
+  if (!msg) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = '';
+  box.innerHTML = '⚠ ' + esc(msg);
+}
+
+// 「走哪条路」→ 统一配色：物理=绿、隧道=紫、声明与实际不一致=黄、认不出=灰
+function viaTag(via) {
+  const v = via || '';
+  const cls = v.indexOf('不一致') >= 0 ? 'tag-warn'
+    : v.indexOf('隧道') >= 0 ? 'tag-tunnel'
+    : v.indexOf('物理') >= 0 ? 'tag-ok'
+    : v.indexOf('解析失败') >= 0 ? 'tag-bad'
+    : 'tag-dim';
+  return `<span class="tag ${cls}">${esc(v || '未知')}</span>`;
+}
+
+/* ── 概览：来自 /api/scan 的轻量摘要（不含网络探测，不拖慢扫描）── */
+function renderSteam(st) {
+  if (!st) return;
+  const badge = $('steamBadge'), meta = $('steamMeta'), grid = $('steamMetrics');
+  if (!badge || !grid) return;
+  if (!st.supported) {
+    badge.textContent = '此平台暂不支持';
+    badge.className = 'mode-badge mode-mixed';
+    meta.textContent = ''; grid.innerHTML = '';
+    return;
+  }
+  if (st.installed === false) {
+    badge.textContent = '未检测到 Steam';
+    badge.className = 'mode-badge mode-mixed';
+    meta.textContent = '按该平台的常见路径都没找到 Steam 目录。';
+    grid.innerHTML = '';
+    return;
+  }
+  badge.textContent = st.running ? '✓ Steam 运行中' : '○ Steam 未运行';
+  badge.className = 'mode-badge ' + (st.running ? 'mode-direct' : 'mode-mixed');
+  meta.innerHTML = `下载区域 <b>CellID ${esc(st.cell_id == null ? '?' : st.cell_id)}</b>`
+    + (st.running_game ? ` · 在跑 <b>${esc(st.running_game)}</b>` : '')
+    + (st.log_at ? ` · 日志最新 <b>${esc(st.log_at)}</b>` : '');
+  const lc = st.last_conn || {};
+  const cap = st.capture || {};
+  grid.innerHTML = [
+    ['最快接入区', st.cm_best ? (st.cm_best.dc + ' ' + st.cm_best.ms + 'ms') : '—',
+      st.cm_best ? 'tone-cyan' : 'tone-dim', ''],
+    ['已测得接入区', st.cm_count || 0, st.cm_count ? 'tone-cyan' : 'tone-dim', '个'],
+    ['最近连接出口', (lc.local_iface || '—'),
+      (lc.verdict || '').indexOf('隧道') >= 0 ? 'tone-purple'
+        : (lc.verdict || '').indexOf('物理') >= 0 ? 'tone-green' : 'tone-dim', ''],
+    ['采样', cap.running ? '进行中' : (cap.done ? '已完成' : '未做'),
+      cap.running ? 'tone-yellow' : (cap.done ? 'tone-green' : 'tone-dim'), ''],
+  ].map(([k, v, tone, unit]) =>
+    `<div class="metric"><div class="k">${k}</div><div class="v ${tone}">${esc(v)}` +
+    `${unit ? `<small> ${unit}</small>` : ''}</div></div>`
+  ).join('');
+  steamErr(st.log_error || '');
+  if (cap.running) scheduleCapPoll();   // 切走再切回来（页面会重扫）也能续上进度
+}
+
+/* ── ⟳ 快照：只读 Steam 自己写的日志，秒出 ── */
+async function steamOverview() {
+  try {
+    const j = await (await fetch('/api/steam/overview')).json();
+    if (!j.ok) { steamErr(j.error || '快照失败'); return; }
+    const env = j.env || {};
+    if (!env.installed) { steamErr('没找到 Steam 安装目录，下面的检测都没有对象。'); return; }
+    steamErr('');
+    $('steamMeta').innerHTML = `账号 <b>${esc(env.persona || '—')}</b>`
+      + (env.steamid ? `（<span class="mono">${esc(env.steamid)}</span>）` : '')
+      + ` · 下载区域 <b>CellID ${esc(env.cell_id)}</b>（${esc(env.cell_src || '?')}）`
+      + ` · <b>${env.running ? 'Steam 运行中' : 'Steam 未运行'}</b>`;
+    renderCmTable((j.cm || {}).cm || []);
+    renderConnFacts((j.cm || {}).latest || []);
+    const csl = j.console || {};
+    toast('已读日志快照' + (csl.relay ? '（最近一次 relay ' + csl.relay + '）' : ''));
+  } catch (e) { steamErr('快照出错：' + (e.message || e)); }
+}
+
+/* ── 平台网：CM 接入区延迟 + 最近连接事实 ── */
+function renderCmTable(rows) {
+  const sk = $('latSkeleton'), tb = $('cmBody'), tb2 = $('cmTable');
+  if (!tb || !tb2) return;
+  tb2.style.display = rows.length ? '' : 'none';
+  tb.innerHTML = rows.map(c =>
+    `<tr><td>${esc(c.dc_cn ? c.dc_cn + '（' + c.dc + '）' : c.dc)}</td>`
+    + `<td class="mono">${esc(c.host)}:${esc(c.port)}</td>`
+    + `<td class="mono tone-cyan">${esc(c.ms)} ms</td>`
+    + `<td class="mono">${esc(c.at || '')}</td></tr>`).join('');
+  if (sk) {
+    sk.style.display = rows.length ? 'none' : '';
+    sk.textContent = rows.length ? '' : '日志里没有可解析的 CM 延迟记录（Steam 可能从未运行过）。';
+  }
+}
+
+// 最近连接：本地地址就是「走没走加速器」的铁证，且是 Steam 自己写的，不需要抓包
+function renderConnFacts(latest) {
+  const box = $('latNote');
+  if (!box) return;
+  if (!(latest || []).length) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  box.innerHTML = '<b>最近几次连接事实</b>（来自 Steam 自己的连接日志）：<br>'
+    + latest.slice().reverse().map(r =>
+      `<span class="mono">${esc(r.at)}</span> → <span class="mono">${esc(r.server_ip)}:${esc(r.server_port)}</span>`
+      + ` 经 <span class="mono">${esc(r.local_ip)}</span>`
+      + (r.local_iface ? `（<span class="mono">${esc(r.local_iface)}</span>）` : '')
+      + ' ' + viaTag(r.verdict || '未知')).join('<br>');
+}
+
+/* ── 📡 实时探测：CM / SDR 中继 / CDN / 商店 ── */
+async function steamProbe() {
+  const btn = $('btnSteamProbe');
+  const wantRefresh = !!($('sdrRefresh') || {}).checked;
+  if (btn) btn.disabled = true;
+  const sk = $('latSkeleton');
+  if (sk) { sk.style.display = ''; sk.textContent = '探测中…（真解析 + 真连接，约 10~20 秒）'; }
+  const sk2 = $('storeSkeleton');
+  if (sk2) { sk2.style.display = ''; sk2.textContent = '探测中…'; }
+  toast('正在探测（约 10~20 秒）…', 2500);
+  try {
+    const [, j] = await postJson('/api/steam/probe', wantRefresh ? { refresh: true } : {});
+    if (j.error) { steamErr(j.error); return; }
+    renderCmTable(j.cm || []);
+    renderRelays(j);
+    renderStore(j);
+    renderCapture(j.capture);
+    steamErr((j.sdr_meta || {}).error ? 'SDR 名单不完整：' + j.sdr_meta.error : '');
+    toast(`探测完成（${j.elapsed_ms} ms）：中继 ${(j.relays || []).length} · 接入区 ${(j.cm || []).length} · CDN ${(j.cdn || []).length}`);
+  } catch (e) {
+    steamErr('探测出错：' + (e.message || e));
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function renderRelays(j) {
+  const rows = j.relays || [];
+  const tb = $('relayBody'), t = $('relayTable');
+  if (tb && t) {
+    t.style.display = rows.length ? '' : 'none';
+    tb.innerHTML = rows.map(x =>
+      `<tr><td>${esc(x.pop)}${x.pop_cn ? '（' + esc(x.pop_cn) + '）' : ''}` +
+      `${x.tier === 0 ? ' <span class="tag tag-ok">tier0</span>' : ''}</td>`
+      + `<td>${esc(x.desc || '')}</td>`
+      + `<td class="mono">${esc(x.ip)}:${esc(x.port)}</td>`
+      + `<td class="mono">${x.icmp_ok ? esc(x.icmp_ms) + ' ms'
+        : '<span class="tone-dim">不回 ICMP</span>'}</td>`
+      + `<td>${viaTag(x.via)}</td></tr>`).join('');
+  }
+  const note = $('relayNote');
+  if (note) {
+    note.style.display = '';
+    note.innerHTML = '<b>ICMP 只是网络层参考值</b>：SDR 走 UDP 且有自己的握手与加密，'
+      + '中继不回 ICMP 是常见现象，<b>不代表游戏连不上</b>，别据此判断联机质量 —— '
+      + '联机质量请看「① 采样」。'
+      + (j.pop_count != null
+        ? ` 本游戏可用中继点共 <b>${esc(j.pop_count)}</b> 个（数据源：`
+          + `${((j.sdr_meta || {}).source === 'online') ? 'Valve 官方接口' : '本机 Steam 缓存'}）。`
+        : '');
+  }
+}
+
+/* ── 内容分发网：商店域名 + 下载主机 ── */
+function renderStore(j) {
+  const st = $('storeBody'), stab = $('storeTable');
+  if (st && stab) {
+    stab.style.display = (j.store || []).length ? '' : 'none';
+    st.innerHTML = (j.store || []).map(d =>
+      `<tr><td class="mono">${esc(d.host)}</td>`
+      + `<td class="mono">${esc((d.ips || [])[0] || '—')}</td>`
+      + `<td class="mono">${d.tcp_ok ? esc(d.tcp_ms) + ' ms'
+        : '<span class="tone-red">连不上</span>'}</td>`
+      + `<td class="mono">${esc(d.first_hop || '—')}</td>`
+      + `<td>${viaTag(d.via)}</td></tr>`).join('');
+  }
+  const cb = $('cdnBody'), ctab = $('cdnTable');
+  if (cb && ctab) {
+    ctab.style.display = (j.cdn || []).length ? '' : 'none';
+    cb.innerHTML = (j.cdn || []).map(c =>
+      `<tr><td class="mono">${esc(c.host)}</td>`
+      + '<td>' + (c.source === 'api'
+        ? '<span class="tag tag-info">官方列表</span>'
+        : '<span class="tag tag-dim">历史真用过</span>') + '</td>'
+      + `<td class="mono">${c.tcp_ok ? esc(c.tcp_ms) + ' ms'
+        : '<span class="tone-red">连不上</span>'}</td>`
+      + `<td>${viaTag(c.via)}</td></tr>`).join('');
+  }
+  const sk = $('storeSkeleton');
+  if (sk) sk.style.display = 'none';
+}
+
+/* ── ① 采样：P2P 稳定性的唯一可信来源 ── */
+function capStatus(st) {
+  const el = $('capState');
+  if (el) {
+    if (st.running) {
+      el.textContent = `采样中…已 ${st.elapsed || 0} 秒 / 共 ${st.seconds} 秒`
+        + `（样本 ${st.samples}）` + (st.target ? ` · 目标：${st.target}` : '');
+    } else if (st.error) {
+      el.textContent = '采样失败：' + st.error;
+    } else if (st.done) {
+      el.textContent = `已完成：共 ${st.seconds} 秒、${st.samples} 个样本`
+        + (st.interrupted ? '（提前结束）' : '')
+        + (st.target ? ` · 目标进程：${st.target}` : '');
+    } else { el.textContent = ''; }
+  }
+  const bar = $('capBar'), fill = $('capBarFill');
+  if (bar && fill) {
+    const show = st.running || (st.done && !st.error);
+    bar.style.display = show ? '' : 'none';
+    bar.classList.toggle('done', !!st.done && !st.running);
+    const p = Math.max(0, Math.min(1, st.progress || 0));
+    fill.style.width = Math.round(p * 100) + '%';
+  }
+  const bs = $('btnCapStart'), bt = $('btnCapStop');
+  if (bs) bs.disabled = !!st.running;
+  if (bt) bt.disabled = !st.running;
+}
+
+function renderCapture(cap) {
+  if (!cap) return;
+  capStatus(cap);
+  const out = $('capOut');
+  if (!out) return;
+  const an = cap.analysis || {};
+  if (!cap.done || !an.samples) {
+    out.innerHTML = cap.done
+      ? '<div class="empty">这次采样没拿到有效样本（可能 Steam 当时没在跑，或系统拦住了 nettop）。</div>'
+      : '';
+    return;
+  }
+  const zr = an.zero_ratio;
+  const zt = zr == null ? 'tone-dim' : zr > 0.2 ? 'tone-red' : zr > 0.05 ? 'tone-yellow' : 'tone-green';
+  const cells = [
+    ['断续率', zr == null ? '—' : Math.round(zr * 100) + '%', zt, '（收发都为 0 的秒数占比）'],
+    ['乱序', an.rx_ooo_delta || 0, an.rx_ooo_delta ? 'tone-yellow' : 'tone-green', '字节'],
+    ['重传', an.re_tx_delta || 0, an.re_tx_delta ? 'tone-yellow' : 'tone-green', '次'],
+    ['下行速率', an.rate_kbps_in || 0, 'tone-cyan', 'kbps（真实值，非估算）'],
+    ['上行速率', an.rate_kbps_out || 0, 'tone-cyan', 'kbps（真实值，非估算）'],
+  ];
+  let h = '<div class="subgrid">' + cells.map(([k, v, t, u]) =>
+    `<div class="cell"><div class="k">${esc(k)}</div>`
+    + `<div class="v ${t}">${esc(v)} <small>${esc(u)}</small></div></div>`).join('') + '</div>';
+
+  // 每秒收发量：空格子 = 那一秒没有数据，就是看得见的卡顿窗口
+  const ser = an.series || [];
+  if (ser.length) {
+    const mx = Math.max(1, ...ser.map(s => (s.in || 0) + (s.out || 0)));
+    h += '<div class="ns" style="margin-top:14px"><b>每秒收发量</b>'
+      + '（灰色格子 = 那一秒没有任何数据 —— 就是卡顿窗口）</div>'
+      + '<div style="display:flex;gap:2px;align-items:flex-end;height:54px;margin-top:6px">'
+      + ser.map(s => {
+          const v = (s.in || 0) + (s.out || 0);
+          const pct = Math.max(3, Math.round(v / mx * 100));
+          return `<div title="${esc(s.t)}s · ${v} 字节" style="flex:1 1 0;min-width:2px;`
+            + `height:${pct}%;background:${v ? 'var(--cyan)' : 'var(--border)'};`
+            + `border-radius:2px;opacity:${v ? '.85' : '1'}"></div>`;
+        }).join('')
+      + '</div>';
+  }
+
+  // 实际连到的中继
+  const hit = an.hit_relays || [];
+  const unk = an.unknown_peers || [];
+  if (hit.length) {
+    h += '<div class="sub" style="margin:14px 0 6px"><b>采样期间实际连到的中继</b></div>'
+      + '<div class="tbl-wrap"><table><thead><tr><th>中继</th><th>IP</th><th>归属依据</th></tr></thead><tbody>'
+      + hit.map(x => `<tr><td>${esc(x.pop)}${x.pop_cn ? '（' + esc(x.pop_cn) + '）' : ''}</td>`
+        + `<td class="mono">${esc(x.ip)}:${esc(x.port)}</td>`
+        + '<td>' + (x.match === 'exact'
+          ? '<span class="tag tag-ok">精确命中</span>'
+          : '<span class="tag tag-warn">同网段推断</span>') + '</td></tr>').join('')
+      + '</tbody></table></div>'
+      + '<div class="netnote">「同网段推断」= 该 IP 不在本机缓存的 SDR 名单里，但和某个已知中继属于同一个 /24 网段。'
+      + 'Steam 的中继 IP 会换号，本机缓存只在上次联网时更新 —— 勾选右上「刷新 SDR 名单」再探测可拿到最新名单。</div>';
+  }
+  if (unk.length) {
+    h += '<div class="netnote">另有 ' + unk.length + ' 个对端不在已知中继名单里：'
+      + unk.map(u => `<span class="mono">${esc(u.ip)}:${esc(u.port)}</span>`).join('、')
+      + '（可能是较新的中继，也可能压根不是 Steam 的中继流量）。</div>';
+  }
+  if (!hit.length && !unk.length) {
+    h += '<div class="netnote">采样期间该进程没有出现公网对端 —— 当时可能不在联机中。进对局后再采一次。</div>';
+  }
+  out.innerHTML = h;
+}
+
+async function capStart() {
+  const sel = $('capSecs');
+  const secs = parseInt((sel && sel.value) || '60', 10);
+  try {
+    const [r, j] = await postJson('/api/steam/capture/start', { seconds: secs });
+    toast(j.message || (r.ok ? '已开始采样' : '开始失败'), 6000);
+    if (j.capture) renderCapture(j.capture);
+    else capStatus({ running: true, seconds: secs, elapsed: 0, samples: 0 });
+    scheduleCapPoll();
+  } catch (e) { toast('开始采样出错：' + (e.message || e), 6000); }
+}
+
+async function capStop() {
+  try {
+    const [, j] = await postJson('/api/steam/capture/stop', {});
+    toast(j.message || '已请求停止', 5000);
+    if (j.capture) renderCapture(j.capture);
+  } catch (e) { toast('停止出错：' + (e.message || e), 6000); }
+}
+
+function scheduleCapPoll() {
+  if (capPollTimer) return;
+  capPollTimer = setInterval(async () => {
+    try {
+      const cap = await (await fetch('/api/steam/capture/result')).json();
+      renderCapture(cap);
+      if (!cap.running) { clearInterval(capPollTimer); capPollTimer = null; }
+    } catch (e) { clearInterval(capPollTimer); capPollTimer = null; }
+  }, 1500);
+}
+
+/* ── ④ 诊断结论 ── */
+async function steamDiagnose() {
+  const btn = $('btnSteamDiag');
+  const out = $('steamDiagOut');
+  if (btn) btn.disabled = true;
+  if (out) out.innerHTML = '<div class="skel">诊断中…（会顺带做一次实时探测，约 10~20 秒）</div>';
+  try {
+    const [, j] = await postJson('/api/steam/diagnose', {});
+    if (j.error) {
+      if (out) out.innerHTML = '<div class="empty">诊断失败：' + esc(j.error) + '</div>';
+      return;
+    }
+    renderSteamDiag(j);
+    if (j.relays) renderRelays(j);
+    if (j.store) renderStore(j);
+    if (j.cm) renderCmTable(j.cm);
+    if (j.capture) renderCapture(j.capture);
+  } catch (e) {
+    if (out) out.innerHTML = '<div class="empty">诊断出错：' + esc(e.message || e) + '</div>';
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function renderSteamDiag(j) {
+  const c = j.counts || {};
+  const LV = { high: ['tag-bad', '高'], mid: ['tag-warn', '中'], info: ['tag-info', '提示'] };
+  let h = `<div class="sub" style="margin-bottom:6px"><b>${esc(j.summary || '')}</b>`
+    + `　<span class="ns">高 ${c.high || 0} · 中 ${c.mid || 0} · 提示 ${c.info || 0}`
+    + (j.appid ? ` · 判定所依据的 appid：${esc(j.appid)}` : '') + '</span></div>';
+  const fs = j.findings || [];
+  h += fs.length
+    ? '<ul class="findings">' + fs.map(f => {
+        const [cls, txt] = LV[f.level] || LV.info;
+        return `<li><div class="fh"><span class="tag ${cls}">${txt}</span>`
+          + `<span class="ft">${esc(f.title)}</span></div>`
+          + `<div class="fd">${esc(f.detail)}</div>`
+          + (f.advice ? `<div class="fa">→ ${esc(f.advice)}</div>` : '')
+          + '</li>';
+      }).join('') + '</ul>'
+    : '<div class="empty">没有可报告项。</div>';
+  const out = $('steamDiagOut');
+  if (out) out.innerHTML = h;
+}
+
+/* ── 事件绑定 ── */
+const steamOverviewBtn = $('btnSteamOverview');
+if (steamOverviewBtn) steamOverviewBtn.onclick = steamOverview;
+const steamProbeBtn = $('btnSteamProbe');
+if (steamProbeBtn) steamProbeBtn.onclick = steamProbe;
+const steamDiagBtn = $('btnSteamDiag');
+if (steamDiagBtn) steamDiagBtn.onclick = steamDiagnose;
+const capStartBtn = $('btnCapStart');
+if (capStartBtn) capStartBtn.onclick = capStart;
+const capStopBtn = $('btnCapStop');
+if (capStopBtn) capStopBtn.onclick = capStop;
+</script>
+</body>
+</html>

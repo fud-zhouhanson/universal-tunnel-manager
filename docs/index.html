@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>通用隧道管理器 · Universal Tunnel Manager</title>
+<meta name="description" content="自动识别本机所有 VPN / 加速器 / 代理(梯子) 隧道，一键在本机直连与隧道之间切换。Windows 免安装包，自带体检工具。">
+<meta property="og:title" content="通用隧道管理器 · Universal Tunnel Manager">
+<meta property="og:description" content="自动识别本机所有 VPN / 加速器 / 梯子隧道，一键切换。Windows 免安装。">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2b303c;
+    --text:#e6e8ec; --dim:#98a0ae; --green:#34c759; --cyan:#32d0ff;
+    --purple:#a78bfa; --orange:#ff9f0a; --yellow:#ffd60a;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.65; padding:40px 20px 60px;
+  }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { font-size:30px; font-weight:800; letter-spacing:-.4px; }
+  .lead { color:var(--dim); font-size:15px; margin:10px 0 26px; }
+  .card {
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:22px 24px; margin-bottom:18px;
+  }
+  h2 { font-size:15px; font-weight:700; color:var(--dim); text-transform:uppercase;
+       letter-spacing:.6px; margin-bottom:14px; }
+  .dl {
+    display:inline-block; text-decoration:none; text-align:center;
+    background:linear-gradient(180deg,rgba(52,199,89,.28),rgba(52,199,89,.16));
+    border:1px solid rgba(52,199,89,.6); color:#7ef0a0;
+    font-size:16px; font-weight:700; padding:14px 30px; border-radius:11px;
+    cursor:pointer; transition:.16s; font-family:inherit;
+  }
+  .dl:hover { transform:translateY(-2px); box-shadow:0 10px 26px rgba(52,199,89,.22); }
+  .dl:active { transform:translateY(0); }
+  .dl.small { font-size:14px; padding:10px 20px; }
+
+  /* ——— 下载项：一个系统一块，主次分明 ——— */
+  .dl-item { margin: 0; }
+  .dl-os { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:10px; }
+  .pill {
+    display:inline-block; font-size:12.5px; font-weight:700; letter-spacing:.3px;
+    padding:3px 12px; border-radius:999px; border:1px solid var(--border);
+  }
+  .pill.win { color:var(--cyan);   border-color:rgba(50,208,255,.5);  background:rgba(50,208,255,.10); }
+  .pill.mac { color:var(--orange); border-color:rgba(255,159,10,.5);  background:rgba(255,159,10,.10); }
+  .dl.big { display:block; width:100%; box-sizing:border-box; font-size:17px; padding:16px 24px; }
+
+  /* ——— 步骤卡 ——— */
+  .step-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px; }
+  .step { background:var(--panel2); border:1px solid var(--border); border-radius:11px; padding:14px 16px; }
+  .step pre { margin:8px 0 0; background:transparent; border:0; padding:0; }
+  .step-os { font-weight:700; font-size:14.5px; }
+  .step-os.win { color:var(--cyan); }
+  .step-os.mac { color:var(--orange); }
+
+  /* ——— 故障排查卡：给一点警示色，显眼但不吓人 ——— */
+  .card.warn-card {
+    border-color:rgba(255,214,10,.42);
+    background:linear-gradient(180deg,rgba(255,214,10,.055),transparent 42%),var(--panel);
+  }
+  .card.warn-card h2 { color:#ffe066; }
+
+  /* ——— 可折叠块 ——— */
+  details.collapse { margin-top:14px; border-top:1px dashed var(--border); padding-top:12px; }
+  details.collapse summary { cursor:pointer; color:var(--dim); font-size:13.5px; list-style:none; }
+  details.collapse summary::-webkit-details-marker { display:none; }
+  details.collapse summary::before { content:"▸ "; color:var(--cyan); }
+  details.collapse[open] summary::before { content:"▾ "; }
+  details.collapse summary:hover { color:var(--text); }
+  .collapse-body { padding:12px 0 2px 16px; }
+  .dim { color:var(--dim); }
+
+  .hint { font-size:13px; color:var(--dim); margin-top:10px; line-height:1.7; }
+  .sep { border:0; border-top:1px solid var(--border); margin:18px 0; }
+  .fname { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; color:var(--dim); }
+  .fname b { color:var(--text); }
+  .mac { color:var(--orange); font-weight:700; }
+  .win { color:var(--cyan); font-weight:700; }
+  ol,ul { padding-left:22px; }
+  li { margin:7px 0; font-size:14.5px; }
+  code {
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px;
+    background:var(--panel2); border:1px solid var(--border);
+    padding:2px 7px; border-radius:6px;
+  }
+  pre {
+    background:var(--panel2); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px; overflow-x:auto; margin:10px 0; font-size:13px;
+    font-family:ui-monospace,Menlo,Consolas,monospace; color:#cfe3ff;
+  }
+  .feat { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+  .feat div {
+    background:var(--panel2); border:1px solid var(--border); border-radius:10px;
+    padding:13px 15px; font-size:13.5px;
+  }
+  .feat b { display:block; margin-bottom:4px; }
+  .tag { display:inline-block; font-size:12px; padding:2px 9px; border-radius:999px;
+         border:1px solid var(--border); color:var(--dim); margin-right:6px; }
+  .tag.g { border-color:rgba(52,199,89,.5); color:var(--green); }
+  .tag.p { border-color:rgba(167,139,250,.5); color:var(--purple); }
+  .note {
+    background:rgba(255,214,10,.1); border:1px solid rgba(255,214,10,.4);
+    color:#ffe066; border-radius:10px; padding:12px 16px; font-size:13.5px; margin-top:14px;
+  }
+  .foot { color:var(--dim); font-size:12.5px; text-align:center; margin-top:26px; }
+
+  /* ——— 免责声明 ——— */
+  .disclaimer {
+    margin-top:16px; padding:14px 18px; border-radius:10px;
+    background:rgba(255,255,255,.028); border:1px solid var(--border);
+    color:var(--dim); font-size:12.5px; line-height:1.85;
+  }
+  .disclaimer b { color:var(--text); }
+  .disclaimer .lead-word {
+    display:inline-block; color:var(--yellow); font-weight:700; margin-right:6px;
+  }
+  .ok { color:var(--green); font-weight:700; }
+  .url { color:var(--cyan); font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>通用隧道管理器</h1>
+  <div class="lead">
+    自动识别本机所有由 <b>VPN / 游戏加速器 / 代理(梯子) / 覆盖网络</b> 构建的隧道，
+    按域名把流量在「隧道」和「本机直连」之间一键切换。不改客户端、不卸载软件、随时回滚。
+    <span class="tag g">macOS</span><span class="tag g">Windows</span><span class="tag p">零依赖</span>
+  </div>
+
+  <div class="card">
+    <h2>① 下载（选你的系统，只下这一个）</h2>
+
+    <div class="dl-item">
+      <div class="dl-os">
+        <span class="pill win">Windows</span>
+        <span class="tag g">推荐 · 对方不用装任何东西</span>
+      </div>
+      <a class="dl big" href="https://github.com/fud-zhouhanson/universal-tunnel-manager/releases/latest/download/TunnelManager-Windows-x64.zip">⬇ 下载 Windows 免安装版</a>
+      <div class="fname"><b>TunnelManager-Windows-x64.zip</b> · 10 MB · 内置运行环境，
+        <b>不需要装 Python</b> · 已自带体检工具</div>
+    </div>
+    <hr class="sep">
+    <div class="dl-item">
+      <div class="dl-os">
+        <span class="pill mac">macOS</span>
+        <span class="tag">需要系统自带 Python 3（mac 一般都有）</span>
+      </div>
+      <a class="dl big" href="https://github.com/fud-zhouhanson/universal-tunnel-manager/releases/latest/download/tunnel-manager.zip">⬇ 下载 macOS 版</a>
+      <div class="fname"><b>tunnel-manager.zip</b> · 125 KB · 含程序 + 安装脚本 + 体检工具</div>
+    </div>
+
+    <p class="hint" style="margin-top:16px">
+      <b>两个包里都已经自带体检工具</b>（启动不了时能一键自检，见第 ③ 节），
+      所以<b>只需要下这一个包</b>。
+      <br><span class="dim">
+        文件直接从 <b>GitHub Releases</b> 下载，点击即存盘，页面本身不承载任何大文件。
+        Windows 包大，是因为里面塞了完整的 Python 运行环境 —— 换来的是对方电脑不用装任何东西。
+        想核对完整性？每个包都附有 SHA256，见仓库的 <code>dist/SHA256SUMS</code> 与 Release 说明。
+      </span>
+    </p>
+    <div class="note" id="dlStatus" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2>② 解压后怎么用（就一步）</h2>
+    <div class="step-grid">
+      <div class="step">
+        <div class="step-os win">Windows</div>
+        <pre>解压 TunnelManager-Windows-x64.zip
+双击  START-双击启动.bat</pre>
+      </div>
+      <div class="step">
+        <div class="step-os mac">macOS</div>
+        <pre>解压 tunnel-manager.zip
+双击  install.sh</pre>
+      </div>
+    </div>
+    <p class="hint">
+      跑完会自动打开浏览器 <span class="url">http://127.0.0.1:7531</span>（只绑本机，同一内网的别人访问不到）。
+      桌面上会出现「隧道管理」图标，以后双击它就打开。
+      <br>Windows 想停掉服务：双击 <code>STOP-停止服务.bat</code>。
+    </p>
+  </div>
+
+  <div class="card warn-card">
+    <h2>③ 万一启动不了？—— 包里自带体检工具，不用另外下</h2>
+    <p style="font-size:14.5px">
+      解压出来的文件夹里，体检工具就<b>和启动文件并排摆着</b>：
+    </p>
+    <pre>Windows → 双击  检查运行.bat
+macOS   → 双击  检查运行.command</pre>
+    <p style="font-size:14.5px">
+      它会自动把环境查一遍，并在同一个文件夹里生成「<b>检查报告.txt</b>」——
+      <b>把那个文件发回来就能定位问题</b>。
+    </p>
+    <ul>
+      <li>检查是<b>只读</b>的：不改路由、不动 DNS、不装任何东西</li>
+      <li>报告里只有系统版本、网卡名、路由状态，<b>不含任何隐私内容</b></li>
+      <li>macOS 首次可能提示「无法验证开发者」→ 在文件上<b>右键 →「打开」</b>，放行一次就好</li>
+    </ul>
+    <details class="collapse">
+      <summary>我程序早就装好了，只想要这个体检工具</summary>
+      <div class="collapse-body">
+        <p class="hint">
+          那可以只下这一个小包（13 KB，<b>一般情况用不到</b>）。
+          解压后把里面的 <code>selftest.py</code> 和对应那个启动器放进程序目录，再双击。
+        </p>
+        <a class="dl small" href="https://github.com/fud-zhouhanson/universal-tunnel-manager/releases/latest/download/RunCheck-tool.zip">⬇ 运行检查工具.zip</a>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>④ 打开后你会看到</h2>
+    <p style="font-size:14.5px">
+      程序只监听本机 <span class="url">http://127.0.0.1:7531</span>，会自动打开浏览器。
+      同一内网的其他人访问不到这个地址，只有你自己能用。
+    </p>
+    <ul>
+      <li><b>检测到的隧道软件</b> — 谁在跑，属于哪一类</li>
+      <li><b>网络接口与隧道归属</b> — 每块网卡是隧道还是物理网卡，归属哪个软件（含 MTU / IPv6 ULA 指纹）</li>
+      <li><b>聚合路由多点抽查</b> — 抓「保留默认路由、偷偷用聚合路由接管」的隐性隧道</li>
+      <li><b>目标域名的路由走向</b> — 我关心的网站，流量现在从哪出去</li>
+      <li><b>真实流量体检</b> — 不看配置只看事实：真解析一次、真连一次、真看第一跳</li>
+      <li><b>应急恢复</b> — DNS 和路由被倒腾乱了一键救回来</li>
+      <li><b>一键切换</b> — 切到本机直连 / 交回隧道；「待确认」可一键取消</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>⑤ 它怎么做到的</h2>
+    <div class="feat">
+      <div><b class="tag p">识别</b>进程证据 + 网卡名证据 + 路由出口证据 + ULA/MTU 指纹，四层融合判定隧道归属</div>
+      <div><b class="tag p">切换</b>给目标 IP 加一条比默认路由更具体的 <code>/32</code> 主机路由，指回物理网关，不动其它流量</div>
+      <div><b class="tag p">回滚</b>每条加过的路由都记进 state 文件，撤销时只删自己加的，绝不碰系统原有路由</div>
+      <div><b class="tag p">安全</b>只绑 127.0.0.1；写操作校验 Origin + CSRF token；只对公网 IP 加路由，防 DNS 投毒</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    通用隧道管理器 · 单文件 Python 程序，不写入系统目录以外的任何位置<br>
+    卸载：删掉解压出的文件夹即可（Windows 免安装版不写注册表、不装服务）<br>
+    源码与许可：<a href="https://github.com/fud-zhouhanson/universal-tunnel-manager" style="color:var(--cyan)">fud-zhouhanson/universal-tunnel-manager</a>
+  </div>
+
+  <div class="disclaimer">
+    <span class="lead-word">免责声明</span>
+    这是一个<b>免费开源项目</b>，按「现状」提供，<b>不提供任何担保</b>；在适用法律允许的最大范围内，
+    作者<b>不承担任何责任</b>。本工具会<b>修改本机路由表与 DNS 配置</b>，误用可能导致<b>暂时断网</b>，
+    请自行评估并承担全部风险。使用前建议先点一次「保存健康基线」；回滚方法见
+    <a href="https://github.com/fud-zhouhanson/universal-tunnel-manager/blob/main/SECURITY.md" style="color:var(--cyan)">SECURITY.md</a>。
+    <br><b>请只从本页或官方 Release 下载，并核对 <code>SHA256SUMS</code></b> ——
+    任何第三方修改、二次打包、镜像或转发的副本，均与本项目作者无关，作者一概不负责。
+    请遵守你所在地区的法律法规，以及所在网络（学校 / 公司 / 运营商）的使用条款。
+  </div>
+</div>
+
+</body>
+</html>

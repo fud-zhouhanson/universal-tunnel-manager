@@ -1,0 +1,36 @@
+# ============================================================
+# 构建产物 —— 体积大，且都能由脚本重新生成，所以不进仓库
+#   bash scripts/build.sh        → 下面这些全部（一条命令）
+#   python3 build.py             → dist/tunnel-manager.py(.zip)
+#   python3 make_tools.py        → tools/检查运行.bat(.command)
+#   python3 make_win_pkg.py      → dist/TunnelManager-Windows-x64.zip（10 MB，含 Python 运行时）
+#   python3 make_download_page.py→ dist/download.html（分享用）
+#                                  docs/index.html（GitHub Pages 用 —— 注意：这一份要提交！）
+# ============================================================
+dist/tunnel-manager.py
+dist/tunnel-manager.zip
+dist/TunnelManager-Windows-x64.zip
+dist/TunnelManager-Windows-x64.dat
+dist/运行检查工具.zip
+dist/RunCheck-tool.zip
+dist/download.html
+dist/SHA256SUMS
+dist/site/
+dist/_winbuild/
+
+# 注意：dist/install.sh 和 dist/install.bat 是**源文件**（不是产物），
+# 所以这里只排除具体文件，不整目录排除 dist/。
+#
+# 同理 docs/index.html 虽然由脚本生成，但 GitHub Pages 要从 /docs 发布，
+# 必须是提交进仓库的静态文件，所以**不能**忽略 docs/。
+
+# ============================================================
+# 本地 / 临时
+# ============================================================
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.log
+tunnel-manager.log
+检查报告.txt
