@@ -47,6 +47,7 @@ REL_BASE = f"https://github.com/{GH_REPO}/releases/latest/download"
 ASSET_WIN = "TunnelManager-Windows-x64.zip"
 ASSET_MAC = "tunnel-manager.zip"
 ASSET_CHK = "RunCheck-tool.zip"          # ASCII 名（gh 上传中文名会被改成 default.zip）
+ASSET_LITE = "TunnelManager-Windows-lite.zip"   # 精简版（不带 Python 运行时）
 
 # Windows 免安装版（内置 Python 运行时）。
 # 为什么 embed 模式下线上要改名成 .dat：托管平台的 WAF 按「URL 里含 .zip」拦
@@ -56,6 +57,12 @@ WIN_PKG = os.path.join(DIST, ASSET_WIN)
 WIN_SERVED_NAME = "TunnelManager-Windows-x64.dat"
 WIN_DL_NAME = ASSET_WIN
 SITE = os.path.join(DIST, "site")
+
+# Windows 精简版（不带 Python 运行时，约 160 KB）。
+# 体积小，直接 base64 内嵌进分享页 —— 不往站点目录多放一个文件，
+# 也就不会多出一个「忘了同步」的漏点。
+LITE_PKG = os.path.join(DIST, ASSET_LITE)
+LITE_NAME = ASSET_LITE
 
 # 独立自检小包（给"已装好程序、不想重下 10 MB"的人；主包里已自带，所以只是备用）
 CHK_ZIP = os.path.join(DIST, "运行检查工具.zip")
@@ -191,11 +198,14 @@ CSS = """
 """
 
 SCRIPT_EMBED = """
-// 两个包都内嵌成 base64，点按钮时在浏览器本地还原成文件下载，无需任何服务器
+// 小包都内嵌成 base64，点按钮时在浏览器本地还原成文件下载，无需任何服务器。
+// （Windows 完整版 10 MB 太大，走同目录的 .dat 相对链接，见 WIN_SERVED_NAME）
 const ZIP_B64 = "%(b64)s";
 const ZIP_NAME = "%(zip_name)s";
 const CHK_B64 = "%(chk_b64)s";
 const CHK_NAME = "%(chk_name)s";
+const LITE_B64 = "%(lite_b64)s";
+const LITE_NAME = "%(lite_name)s";
 
 function saveB64(b64, name, label) {
   const s = document.getElementById('dlStatus');
@@ -228,6 +238,12 @@ document.getElementById('btnDl').addEventListener('click',
   if (!CHK_B64) { b.disabled = true; b.textContent = '（暂未提供）'; return; }
   b.addEventListener('click', () => saveB64(CHK_B64, CHK_NAME, '%(chk_size_txt)s'));
 })();
+(function () {
+  const b = document.getElementById('btnLite');
+  if (!b) return;
+  if (!LITE_B64) { b.disabled = true; b.textContent = '（暂未提供）'; return; }
+  b.addEventListener('click', () => saveB64(LITE_B64, LITE_NAME, '%(lite_size_txt)s'));
+})();
 """
 
 
@@ -238,12 +254,15 @@ def build_page(mode):
     size_txt = _size(ZIP)
     win_size = _size(WIN_PKG)
     chk_size_txt = _size(CHK_ZIP)
+    lite_size = _size(LITE_PKG)
 
     if mode == "embed":
         win_ctrl = (f'<a class="dl big" href="./{WIN_SERVED_NAME}" '
                     f'download="{WIN_DL_NAME}">⬇ 下载 Windows 免安装版</a>')
         mac_ctrl = '<button class="dl big" id="btnDl">⬇ 下载 macOS 版</button>'
         chk_ctrl = '<button class="dl small" id="btnChk">⬇ 运行检查工具.zip</button>'
+        lite_ctrl = ('<button class="dl small" id="btnLite">'
+                     f'⬇ 下载 Windows 精简版（{lite_size}）</button>')
         dl_note = (
             "<span class=\"dim\">\n"
             "        Windows 那个包大，是因为里面塞了完整的 Python 运行环境 —— 换来的是"
@@ -261,6 +280,8 @@ def build_page(mode):
                     f'⬇ 下载 macOS 版</a>')
         chk_ctrl = (f'<a class="dl small" href="{REL_BASE}/{ASSET_CHK}">'
                     f'⬇ 运行检查工具.zip</a>')
+        lite_ctrl = (f'<a class="dl small" href="{REL_BASE}/{ASSET_LITE}">'
+                     f'⬇ 下载 Windows 精简版（{lite_size}）</a>')
         dl_note = (
             "<span class=\"dim\">\n"
             "        文件直接从 <b>GitHub Releases</b> 下载，点击即存盘，页面本身不承载任何大文件。\n"
@@ -281,6 +302,17 @@ def build_page(mode):
       {win_ctrl}
       <div class="fname"><b>{WIN_DL_NAME}</b> · {win_size} · 内置运行环境，
         <b>不需要装 Python</b> · 已自带体检工具</div>
+      <details class="collapse" style="margin-top:12px">
+        <summary>对方电脑上本来就装了 Python？那可以下这个小得多的精简版</summary>
+        <div class="collapse-body">
+          <p class="hint">
+            精简版只有 <b>{lite_size}</b>（完整版是 {win_size}）—— 功能完全一样，
+            只是<b>不带 Python 运行环境</b>，改用它电脑上已经装好的 Python 3。
+            <br><b>不确定对方装没装 Python，就用上面那个完整版</b>，那个不需要对方装任何东西。
+          </p>
+          {lite_ctrl}
+        </div>
+      </details>
     </div>
     <hr class="sep">"""
 
@@ -491,13 +523,20 @@ def main():
         if os.path.isfile(CHK_ZIP):
             with open(CHK_ZIP, "rb") as f:
                 chk_b64 = base64.b64encode(f.read()).decode("ascii")
+        lite_b64 = ""
+        if os.path.isfile(LITE_PKG):
+            with open(LITE_PKG, "rb") as f:
+                lite_b64 = base64.b64encode(f.read()).decode("ascii")
         script = SCRIPT_EMBED % {
             "b64": base64.b64encode(raw).decode("ascii"),
             "zip_name": ASSET_MAC,
             "chk_b64": chk_b64,
             "chk_name": CHK_DL_NAME,
+            "lite_b64": lite_b64,
+            "lite_name": LITE_NAME,
             "size_txt": human(len(raw)),
             "chk_size_txt": _size(CHK_ZIP),
+            "lite_size_txt": _size(LITE_PKG),
         }
         html = build_page("embed").replace("</body>", f"<script>{script}</script>\n</body>")
         _write(OUT_EMBED, html)

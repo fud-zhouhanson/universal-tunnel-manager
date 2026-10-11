@@ -7,10 +7,11 @@
 # 产物（都在 dist/，均已被 .gitignore 排除）：
 #   dist/tunnel-manager.py              单文件程序（内嵌前端）
 #   dist/tunnel-manager.zip             macOS / Linux 通用包
-#   dist/TunnelManager-Windows-x64.zip   Windows 免安装包（内置 Python 运行时）
+#   dist/TunnelManager-Windows-x64.zip   Windows 免安装包（内置 Python 运行时，~10 MB）
+#   dist/TunnelManager-Windows-lite.zip  Windows 精简包（不带运行时，~160 KB，需对方已装 Python 3）
 #   dist/RunCheck-tool.zip              备用体检小包（ASCII 名，供 Release / Pages 直链）
 #   dist/运行检查工具.zip                 同上（中文名，供本地分发给中文用户）
-#   dist/download.html                  分享落地页（zip 以 base64 内嵌，本地生成下载）
+#   dist/download.html                  分享落地页（小包以 base64 内嵌，本地生成下载）
 #   dist/SHA256SUMS                     以上产物的校验和
 #   docs/index.html                     GitHub Pages 落地页（下载指向 GitHub Releases）
 #

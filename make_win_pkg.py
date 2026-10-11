@@ -18,13 +18,23 @@ dist/_winbuild/（可随时删除，只会导致下次重新下载）。
 
 产物
 ----
-    dist/TunnelManager-Windows-x64.zip        约 10.3 MB
+    dist/TunnelManager-Windows-x64.zip        约 10.4 MB 【完整版，自带运行时】
       └─ TunnelManager-Windows-x64/
            START-双击启动.bat      ← 用户双击这个
            STOP-停止服务.bat
            使用说明.txt
            app/tunnel-manager.py   ← dist 里的单文件版
            runtime/                ← 嵌入式 Python（30+ 个文件）
+           检查运行.bat / selftest.py
+
+    dist/TunnelManager-Windows-lite.zip       约 150 KB 【精简版，需对方已装 Python 3】
+      └─ TunnelManager-Windows-lite/
+           START-双击启动.bat      ← 自己去找系统里的 Python（py -3 / python / python3）
+           STOP-停止服务.bat
+           使用说明.txt
+           app/tunnel-manager.py   ← 与完整版逐字节相同
+           检查运行.bat / selftest.py
+      （两个包的 app/tunnel-manager.py 必须一致，只是有没有 runtime 的区别）
 
 三条必须遵守的细节（都是实测踩出来的，别改）
 --------------------------------------------
@@ -79,10 +89,12 @@ if not exist "runtime\python313.dll"  goto baddir
 
 rem ---------------------------------------------------------------
 rem 已经在跑就不要再起一个（否则端口顺延到 7532，出现两个界面）
-rem 用 .NET TcpClient 探 7531，比 Test-NetConnection 快得多
+rem 用 netstat 而不是 PowerShell：实测有些装了安全管理软件的电脑上
+rem powershell.exe 会被策略拦住（WinError 786），netstat 是 System32
+rem 原生程序不受影响，而且更快。
 rem ---------------------------------------------------------------
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 7531); $c.Close(); exit 0 } catch { exit 1 }"
-if %errorlevel%==0 (
+netstat -ano | findstr /r /c:":7531 .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
   echo.
   echo   服务已经在运行，直接打开界面 ...
   start "" http://127.0.0.1:7531
@@ -164,9 +176,12 @@ README_TXT = """通用隧道管理 · Windows 免安装版
   把它连同「检查报告.txt」一起发回来就能定位问题。
 
 【已知限制（重要）】
-  · 「一键切换出口」目前只支持 macOS。
-  · Windows 分支的代码没有在真机上完整测试过，能启动、界面能用，
-    但网络扫描/改路由这类功能是否完全正常，需要在你的机器上验证。
+  · Windows 分支尚未在真机上完整验证过：能启动、界面能用，
+    但网络扫描/改路由这类功能是否完全正常，需要在你的机器上确认。
+  · 如果界面顶部出现橙色提示条说「已自动回退到原生命令」，
+    那是因为这台电脑的 PowerShell 被安全策略拦住了（装了深信服 /
+    奇安信这类管理软件的常见现象）。程序会自动改用系统原生命令，
+    功能不受影响，按提示看即可。
 
 【卸载】
   直接删除整个文件夹即可 —— 不写注册表、不装系统服务、不设开机自启。
@@ -189,10 +204,15 @@ pushd "%~dp0" 2>nul || goto nocwd
 
 if not exist "selftest.py" goto noself
 
+rem 依次找一个真能用的 Python 3：本包 runtime / 上一级 runtime / 系统里的
+rem （用"真的执行一句 import sys"来验证 —— 商店版的 python.exe 是个存根，
+rem   只 where 出来没用，跑起来会弹应用商店）
 set PY=
-if exist "runtime\python.exe" set PY=runtime\python.exe
-if not defined PY if exist "..\runtime\python.exe" set PY=..\runtime\python.exe
-if not defined PY ( where python >nul 2>&1 && set PY=python )
+if exist "runtime\python.exe" set PY="runtime\python.exe"
+if not defined PY if exist "..\runtime\python.exe" set PY="..\runtime\python.exe"
+if not defined PY call :trypy "py -3"
+if not defined PY call :trypy "python"
+if not defined PY call :trypy "python3"
 if not defined PY goto nopy
 
 echo.
@@ -201,7 +221,7 @@ echo   正在检查，大约 10 到 40 秒，请稍等 ...
 echo.
 
 rem -X utf8 必须带：详见 make_win_pkg.py 文件头的说明
-"%PY%" -X utf8 selftest.py
+%PY% -X utf8 selftest.py
 
 echo.
 echo   ------------------------------------------------------------
@@ -240,7 +260,161 @@ echo   当前目录： %CD%
 echo.
 pause
 exit /b 1
+
+:trypy
+%~1 -c "import sys" >nul 2>&1
+if %errorlevel%==0 set PY=%~1
+exit /b
 """
+
+# ============================================================
+# 精简版（不带 Python 运行时，用电脑上已装的 Python 3）
+# ============================================================
+# 完整版 10.4 MB，其中 99% 是 runtime/。给"电脑上本来就有 Python"的人
+# 一个 150 KB 的包，下起来快得多。
+# ⚠️ 两个包的 app/tunnel-manager.py 必须是同一份（逐字节），
+#    差别只在 runtime/ 与启动器找解释器的方式。
+TOP_LITE = "TunnelManager-Windows-lite"
+OUT_LITE = os.path.join(DIST, "TunnelManager-Windows-lite.zip")
+
+START_BAT_LITE = r"""@echo off
+title Universal Tunnel Manager (lite)
+
+rem ---------------------------------------------------------------
+rem 精简版：不带 Python 运行时，用这台电脑上已装的 Python 3。
+rem 想要"什么都不用装"的，请用完整版 TunnelManager-Windows-x64.zip。
+rem pushd 而不是 cd /d —— UNC 路径下 cd /d 会直接失败（详见完整版说明）。
+rem ---------------------------------------------------------------
+pushd "%~dp0" 2>nul || goto baddir
+
+if not exist "app\tunnel-manager.py" goto baddir
+
+rem 依次找一个真能用的 Python 3：py 启动器 / python / python3
+rem （只认 where 出来没用 —— 商店版的 python.exe 是个存根，跑起来会弹应用商店，
+rem   所以这里用"真的执行一句 import sys"来验证）
+set PY=
+call :trypy "py -3"
+if not defined PY call :trypy "python"
+if not defined PY call :trypy "python3"
+if not defined PY goto nopy
+
+rem 已经在跑就不要再起一个（netstat 是 System32 原生程序，不依赖 PowerShell）
+netstat -ano | findstr /r /c:":7531 .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo.
+  echo   服务已经在运行，直接打开界面 ...
+  start "" http://127.0.0.1:7531
+  timeout /t 3 /nobreak >nul
+  exit /b 0
+)
+
+echo.
+echo   通用隧道管理 · 正在启动 ... （精简版）
+echo   ------------------------------------------------
+echo   浏览器会在几秒内自动打开： http://127.0.0.1:7531
+echo   若没自动打开，请手动在浏览器输入上面这个网址。
+echo.
+echo   停止服务：双击 STOP-停止服务.bat
+echo   运行日志：本文件夹下的 tunnel-manager.log
+echo.
+
+rem -X utf8 必须带：日志重定向到文件后 stdout 会退回系统 locale 编码，
+rem 英文版 Windows（cp1252）下中文 print 会直接抛 UnicodeEncodeError。
+start "TunnelManager" /min cmd /c "%PY% -X utf8 "%~dp0app\tunnel-manager.py" 1> "%~dp0tunnel-manager.log" 2>&1"
+
+echo   已启动（服务在本机后台运行，关掉本窗口不影响）。
+timeout /t 6 /nobreak >nul
+exit /b 0
+
+:trypy
+%~1 -c "import sys" >nul 2>&1
+if %errorlevel%==0 set PY=%~1
+exit /b
+
+:baddir
+echo.
+echo   [错误] 启动失败。请按顺序确认：
+echo     1) 解压时保留了完整目录结构（应有 app\ 这个文件夹）
+echo     2) 不要在压缩包里直接双击，要先解压
+echo     3) 不要放在网络共享 / 虚拟机的 UNC 路径下运行
+echo   当前目录： %CD%
+echo.
+pause
+exit /b 1
+
+:nopy
+echo.
+echo   [错误] 这台电脑上没有找到可用的 Python 3。
+echo.
+echo   两个办法，二选一：
+echo     A) 改用「完整版」压缩包 TunnelManager-Windows-x64.zip（约 10 MB）
+echo        它自带 Python，解压双击就能用，电脑上什么都不用装。
+echo     B) 自己装一个： https://www.python.org/downloads/windows/
+echo        安装时记得勾选「Add python.exe to PATH」。
+echo.
+echo   本包是精简版，体积小正是因为不含 Python。
+echo.
+pause
+exit /b 1
+"""
+
+README_LITE = """通用隧道管理 · Windows 精简版
+========================================
+
+【这个包和完整版有什么区别】
+  · 完整版（约 10 MB，文件名 TunnelManager-Windows-x64.zip）：
+    自带 Python 运行环境，解压双击就能用，电脑上什么都不用装。
+  · 精简版（就是本包，约 150 KB）：
+    不带运行环境，需要这台电脑上已经装好 Python 3。
+    已经装过 Python 的话，下它更快。
+  除了这一点，两个包的界面和功能完全一样。
+
+【怎么用】
+  1. 先把压缩包完整解压出来（不要在压缩包里直接双击！）
+  2. 双击  START-双击启动.bat
+  3. 浏览器会自动打开 http://127.0.0.1:7531
+
+【提示「没有找到可用的 Python 3」？】
+  说明这台电脑没装 Python（或没加进 PATH）。两个办法：
+    A) 改用「完整版」压缩包 —— 它自带运行环境，解压双击即可，
+       不用装任何东西。这是最省事的做法。
+    B) 自己装一个官方版：https://www.python.org/downloads/windows/
+       安装时记得勾选「Add python.exe to PATH」。
+
+【怎么停止】
+  双击  STOP-停止服务.bat
+  或者直接关掉那个最小化的黑窗口。
+
+【启动不了 / 想先体检一下】
+  双击  检查运行.bat  —— 它会自己做一遍全面检查，
+  并生成「检查报告.txt」。把那个文件发回给我，就能定位问题。
+  这个检查是只读的：不改路由、不动 DNS、不装东西。
+
+【会弹防火墙吗】
+  服务只监听 127.0.0.1（本机回环），同一局域网里的其他人访问不到。
+  如果 Windows 弹出防火墙提示，选「允许」即可。
+
+【出问题怎么查】
+  启动后本文件夹会出现 tunnel-manager.log，里面是服务的输出，
+  把它连同「检查报告.txt」一起发回来就能定位问题。
+
+【已知限制（重要）】
+  · Windows 分支尚未在真机上完整验证过：能启动、界面能用，
+    但网络扫描/改路由这类功能是否完全正常，需要在你的机器上确认。
+  · 如果界面顶部出现橙色提示条说「已自动回退到原生命令」，
+    那是因为这台电脑的 PowerShell 被安全策略拦住了（装了深信服 /
+    奇安信这类管理软件的常见现象）。程序会自动改用系统原生命令，
+    功能不受影响，按提示看即可。
+
+【卸载】
+  直接删除整个文件夹即可 —— 不写注册表、不装系统服务、不设开机自启。
+  配置与记忆在：%USERPROFILE%\\.tunnel-manager
+  （想彻底清干净就连它一起删）
+
+【版本】
+  精简版 · 使用这台电脑上已安装的 Python 3（建议 3.9 或更高）
+"""
+
 
 EXTRA_README = """运行检查工具 · 怎么用（macOS / Windows 都有）
 ========================================
@@ -366,6 +540,44 @@ def main():
     print(f"完成：{OUT_ZIP}")
     print(f"      {size} 字节 ({human(size)})")
 
+    # ------------------------------------------------------------
+    # 精简版：不带 runtime，只有 app/ + 启动器 + 自检（几百 KB）
+    # 给"电脑上本来就有 Python"的人；app 里的 py 与完整版逐字节相同
+    # ------------------------------------------------------------
+    print()
+    print("④ 组装精简版（不带 Python 运行时）")
+    lite_root = os.path.join(CACHE, "pkg-lite")
+    lite = os.path.join(lite_root, TOP_LITE)
+    if os.path.isdir(lite_root):
+        shutil.rmtree(lite_root)
+    os.makedirs(os.path.join(lite, "app"))
+
+    shutil.copy2(SRC_PY, os.path.join(lite, "app", "tunnel-manager.py"))
+    with open(os.path.join(lite, "START-双击启动.bat"), "w",
+              encoding="gbk", newline="\r\n") as f:
+        f.write(START_BAT_LITE)
+    with open(os.path.join(lite, "STOP-停止服务.bat"), "w",
+              encoding="gbk", newline="\r\n") as f:
+        f.write(STOP_BAT)
+    with open(os.path.join(lite, "使用说明.txt"), "w",
+              encoding="utf-8-sig", newline="\r\n") as f:
+        f.write(README_LITE)
+    shutil.copy2(selftest_src, os.path.join(lite, "selftest.py"))
+    with open(os.path.join(lite, "检查运行.bat"), "w",
+              encoding="gbk", newline="\r\n") as f:
+        f.write(SELFTEST_BAT)
+
+    with zipfile.ZipFile(OUT_LITE, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for root, _dirs, files in os.walk(lite):
+            for fn in files:
+                full = os.path.join(root, fn)
+                arc = os.path.relpath(full, lite_root).replace(os.sep, "/")
+                z.write(full, arc)
+
+    lsz = os.path.getsize(OUT_LITE)
+    print(f"完成：{OUT_LITE}")
+    print(f"      {lsz} 字节 ({human(lsz)}) —— 不含 Python，需对方电脑已装 Python 3")
+
     # 独立小工具包：只想单独发给"已经下过整包"的人时用（几 KB）
     # 双平台：Windows 用 .bat，macOS 用 .command，共用同一个 selftest.py
     mac_cmd_src = os.path.join(HERE, "tools", "检查运行.command")
@@ -381,10 +593,13 @@ def main():
     print(f"      {esz} 字节 ({human(esz)}) —— 可单独发，放进解压后的目录里即可")
     print()
     print("交付说明：")
-    print("  ① 整包：发给 Windows 用户 → 解压 → 双击 START-双击启动.bat（不用装 Python）")
-    print("  ② 体检：让他双击 检查运行.bat（Win）/ 检查运行.command（mac）")
+    print("  ① 完整版（10 MB，什么都不用装）：发给 Windows 用户 → 解压 →")
+    print("     双击 START-双击启动.bat")
+    print("  ② 精简版（150 KB，需对方已装 Python 3）：发给本来就装了 Python 的人，")
+    print("     解压 → 双击 START-双击启动.bat；没装 Python 就提示他改用完整版")
+    print("  ③ 体检：让他双击 检查运行.bat（Win）/ 检查运行.command（mac）")
     print("          → 把生成的 检查报告.txt 发回")
-    print("  ③ 只发体检：把 运行检查工具.zip 单独发过去（双平台），解压到程序目录再双击")
+    print("  ④ 只发体检：把 运行检查工具.zip 单独发过去（双平台），解压到程序目录再双击")
 
 
 if __name__ == "__main__":

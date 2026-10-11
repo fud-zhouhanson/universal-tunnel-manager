@@ -745,7 +745,7 @@ bash install.sh          # 或双击 install.sh；bash install.sh run 可装完�
 
 卸载：`rm -rf ~/.tunnel-manager ~/Desktop/隧道管理.command`（Windows 删目录 + 快捷方式）。
 
-### 7.2.1 Windows 免安装版（对方不用装 Python）
+### 7.2.1 Windows 包：完整版（免安装）+ 精简版
 
 Windows 用户常常没有 Python。而**macOS 上无法交叉编译出 `.exe`**
 （PyInstaller / Nuitka 都只能在目标平台上构建），所以改用
@@ -754,21 +754,50 @@ Windows 用户常常没有 Python。而**macOS 上无法交叉编译出 `.exe`**
 ```bash
 python3 make_win_pkg.py
 # 首次会自动下载 python-3.13.12-embed-amd64.zip (~11 MB)，缓存在 dist/_winbuild/
-# 产物：dist/TunnelManager-Windows-x64.zip   (10.3 MB)
+# 产物：dist/TunnelManager-Windows-x64.zip    (10.4 MB，完整版)
+#       dist/TunnelManager-Windows-lite.zip   (160 KB，精简版)
 ```
+
+**一个脚本出两个包**，差别只有一个维度 —— 带不带运行时：
+
+| | 完整版 `…-Windows-x64.zip` | 精简版 `…-Windows-lite.zip` |
+|---|---|---|
+| 体积 | 10.4 MB | **160 KB** |
+| 自带 Python | ✅ 有 `runtime/` | ❌ 无 |
+| 对方要装什么 | **什么都不用装** | 需要电脑上已有 Python 3 |
+| 怎么找解释器 | 固定用包内 `runtime\python.exe` | 依次试 `py -3` → `python` → `python3`，**真的执行一句 `import sys` 才算数** |
+| 什么时候用 | 默认发它，最省事 | 对方本来就装了 Python（或不想下 10 MB） |
+
+> **精简版存在的理由很单纯**：10.4 MB 里 **99% 是 `runtime/`**，程序本体只有一个
+> 440 KB 的 `.py`。已经装过 Python 的人没必要再下一遍运行时。
+> 但**默认还是发完整版** —— 你没法保证对方装了 Python；精简版找不到解释器时，
+> 启动器会直接提示他改用完整版。
+
+两个包的 **`app/tunnel-manager.py` 必须逐字节相同**（同一份 `dist/tunnel-manager.py`），
+差别只在有没有 `runtime/`、以及启动器怎么找解释器。校验时会断言这一点。
 
 包内结构：
 
 ```
-TunnelManager-Windows-x64/
-├── START-双击启动.bat      ← 用户只需双击这个
+TunnelManager-Windows-x64/          （完整版）
+├── START-双击启动.bat    ← 用户只需双击这个
 ├── STOP-停止服务.bat
+├── 检查运行.bat
 ├── 使用说明.txt
+├── selftest.py
 ├── app/tunnel-manager.py
-└── runtime/                ← 嵌入式 Python（32 个文件）
+└── runtime/              ← 嵌入式 Python（32 个文件，10.2 MB）
+
+TunnelManager-Windows-lite/         （精简版）
+├── START-双击启动.bat    ← 改成去系统里找 Python
+├── STOP-停止服务.bat
+├── 检查运行.bat
+├── 使用说明.txt
+├── selftest.py
+└── app/tunnel-manager.py ← 与完整版逐字节相同，没有 runtime/
 ```
 
-对方：下载 → 解压 → 双击 `START-双击启动.bat`。**不需要安装任何东西。**
+对方：下载 → 解压 → 双击 `START-双击启动.bat`。完整版**不需要安装任何东西。**
 
 **内置了自检工具**（`检查运行.bat` + `selftest.py`）：对方启动不了、或者想先确认环境，
 双击 `检查运行.bat` 就会跑一遍全面检查并生成「检查报告.txt」，把那个文件发回来即可定位。
@@ -796,7 +825,7 @@ TunnelManager-Windows-x64/
 |---|---|---|
 | bat 编码 | **GBK**（`encoding='gbk'`） | 中文提示乱码。`chcp 65001` 救不了 —— 它执行在解析**之后** |
 | 中文输出 | `python.exe -X utf8 app\...py` | embeddable 有 `._pth` → isolated 模式 → `PYTHONIOENCODING` 等**环境变量被忽略**；日志重定向后 stdout 退回系统 locale，英文版 Windows（cp1252）下中文 `print` 直接抛 `UnicodeEncodeError` |
-| 重复双击 | 启动前用 `Net.Sockets.TcpClient` 探 7531 | 起第二个实例，端口顺延 7532，用户看到两个界面 |
+| 重复双击 | 启动前用 `netstat -ano \| findstr ":7531.*LISTENING"` 探 7531 | 起第二个实例，端口顺延 7532，用户看到两个界面。⚠️ **别用 PowerShell 的 `Net.Sockets.TcpClient`**：实测有的电脑 `powershell.exe` 被安全策略拦住（WinError 786），那条检测会直接失效。`netstat` 是 System32 原生命令，不受影响 |
 
 **没有 Windows 机器时怎么验证**（本次用过的三步）：
 
@@ -911,7 +940,8 @@ bash scripts/build.sh
 
 | 文件 | 给谁 |
 |---|---|
-| `TunnelManager-Windows-x64.zip` | Windows，**免安装**（内置 Python 运行时） |
+| `TunnelManager-Windows-x64.zip` | Windows **完整版**，免安装（内置 Python 运行时，10.4 MB） |
+| `TunnelManager-Windows-lite.zip` | Windows **精简版**（不带运行时，160 KB，需对方已有 Python 3） |
 | `tunnel-manager.zip` | macOS / Linux（需系统自带 Python 3） |
 | `RunCheck-tool.zip` / `运行检查工具.zip` | 备用体检小包（前一个 ASCII 名供 Release/Pages 直链） |
 | `download.html` | 分享落地页（小包以 base64 内嵌，浏览器本地生成下载） |
@@ -932,7 +962,8 @@ bash scripts/build.sh
 ### 11.3 发布 Release
 
 **推荐**：推一个 `v*` 标签，`.github/workflows/release.yml` 会自动构建并把
-`TunnelManager-Windows-x64.zip` / `tunnel-manager.zip` / `RunCheck-tool.zip` / `SHA256SUMS`
+`TunnelManager-Windows-x64.zip` / `TunnelManager-Windows-lite.zip` /
+`tunnel-manager.zip` / `RunCheck-tool.zip` / `SHA256SUMS`
 挂到 Release 上。
 
 手工发布（本机网络推不动 `github.com` 时可用）：
@@ -940,6 +971,7 @@ bash scripts/build.sh
 ```bash
 gh release create v1.0.1 \
   dist/TunnelManager-Windows-x64.zip \
+  dist/TunnelManager-Windows-lite.zip \
   dist/tunnel-manager.zip \
   dist/RunCheck-tool.zip \
   dist/SHA256SUMS --title "v1.0.1"
