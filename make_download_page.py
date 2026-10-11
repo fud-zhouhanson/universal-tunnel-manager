@@ -640,7 +640,18 @@ def main():
     # ---- ② release：docs/index.html（GitHub Pages 用；下载指向 Releases 直链）----
     _write(OUT_RELEASE, build_page("release"))
 
+    # ---- 站点目录：把「部署源」需要的两份一并刷新 ----
+    # dist/site/ 是往云托管部署的那个目录，其中 index.html 与 tunnel-manager.zip
+    # 历来靠手工 cp —— 而"忘了 cp / 只 cp 没部署"是同一个反复踩的漏点。
+    # 收进构建里，site/ 就永远等于 dist/ 当前产物，只剩"记得部署"这一个动作。
+    if os.path.isfile(OUT_EMBED):
+        os.makedirs(SITE, exist_ok=True)
+        _copy_over(OUT_EMBED, os.path.join(SITE, "index.html"))
+    if os.path.isfile(ZIP):
+        _copy_over(ZIP, os.path.join(SITE, os.path.basename(ZIP)))
+
     print(f"\n落地页已生成：{OUT_EMBED} / {OUT_RELEASE}")
+    print(f"部署源已刷新：{SITE}/")
 
 
 if __name__ == "__main__":

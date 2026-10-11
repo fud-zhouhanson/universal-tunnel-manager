@@ -110,46 +110,95 @@
 
 ```
 universal-tunnel-manager/
-├── server.py           后端（跨平台，零依赖）：扫描 + 判定 + 路由操作 + HTTP API
+├── tunnel_manager/     后端源码（跨平台，零依赖）：扫描 + 判定 + 路由操作 + HTTP API
 ├── index.html          前端（管理面板）：隧道列表 + 路由走向 + 一键切换 + 自动追踪
-├── build.py            打包脚本：把 index.html 内嵌进 server.py → dist/ 单文件分发版
-├── make_preview.py     生成 preview.html：静态预览版（示例数据，不启后端也能看界面）
+├── bundle.py           把 tunnel_manager/ 拼成单文件（构建与开发入口共用同一份拼接逻辑）
+├── build.py            打包脚本：调 bundle 出单文件，再补上随包分发的辅助文件 + 打 zip
+├── make_tools.py       生成「检查运行.bat / .command」启动器（.bat 必须 GBK）
+├── make_win_pkg.py     打 Windows 免安装包（内置 Python 运行时）与精简包
 ├── make_download_page.py  生成 dist/download.html：把 zip 内嵌进去的可分享落地页
-├── preview.html        静态预览（示例数据，可直接用浏览器打开看完整界面）
+├── scripts/build.sh    一键构建全部产物 + SHA256SUMS
+├── tools/selftest.py   运行环境自检（双平台双击即用）
 ├── start.sh            macOS 启动脚本
 ├── start.bat           Windows 启动脚本
 ├── stop.bat            Windows 停止脚本
 ├── tunnel-manager.command  macOS 双击启动
 └── dist/               分发产物（给自己或别人用）
-    ├── tunnel-manager.py    单文件版（85 KB，内嵌前端，整包只此一个 .py）
+    ├── tunnel-manager.py    单文件版（内嵌前端，整包只此一个 .py）
     ├── tunnel-manager.zip   打包下载（含 py + 双平台安装脚本 + README）
-    ├── install.sh           macOS 一键安装（curl|bash 或双击）
-    ├── install.bat          Windows 一键安装
+    ├── TunnelManager-Windows-x64.zip   Windows 免安装版（内置运行时）
+    ├── TunnelManager-Windows-lite.zip  Windows 精简版（需对方已装 Python 3）
+    ├── 运行检查工具.zip       可单独发的体检小包
     ├── download.html        可分享的落地页（内嵌 zip，点按钮即下载）
     └── site/index.html      托管用入口（= download.html），配合静态托管发布成链接
+```
 
-后端模块划分（server.py）：
-  一、TUNNEL_KNOWLEDGE      48 条软件识别知识库
-  二、通用工具               run / run_ps / run_root / run_elevated_win / verify_sudo
-  三、进程证据               list_processes / detect_software
-  四、接口证据               scan_interfaces_mac / scan_interfaces_win / is_tunnel_iface
-  五、路由证据               default_route / iface_of / phys_gateway
-  六、配置                   load_config / save_config / resolve_a
-  六.5、自动追踪             _scan_history_once / auto_domains_loop / managed_domains
-                             / _extract_domain（浏览器历史 → 目标域名；读取状态经 auto_status 上报）
-  七、归属判定               classify_tunnel（四层证据融合）
-  八、统一扫描               do_scan / scan_mac / scan_win / scan_domains
-  九、路由操作               do_apply / do_undo / route_add_cmd / route_del_cmd
-                             （do_apply 吃 managed_domains() = 配置表 + 追踪集，已去重）
-  十、HTTP 服务              GET /api/scan · POST /api/apply|undo|config|sudo|auto/*
+### 源码为什么是「包 + 组装器」而不是普通包
+
+对外只交付**单文件** `tunnel-manager.py`（用户双击即用，这是产品卖点），
+所以源码拆包后必须在构建期拼回去。但源码**不是**一组互相 `import` 的模块：
+
+- 迁移前它是一份 6800 行的单命名空间脚本，227 个顶层函数互相随便调；
+  实测跨块引用 **471 处**、其中含 **10 组循环依赖** —— 硬拆 `import` 会直接 ImportError。
+- 现在按章节切成 **39 个切片**，**切片之间零 import**，谁调谁靠「同一命名空间」；
+  顺序由 `tunnel_manager/_slices.py` 的 `SLICES` 持有（= 迁移前的书写顺序）。
+- **开发期** `python -m tunnel_manager.main` 与**构建期** `bundle.py` 共用同一份
+  `assemble()`，不搞两套实现。所以「怎么跑」和「怎么打包」永远是同一件事。
+
+> 切片文件里直接引用别的切片定义的函数/常量、却不写 import，是**设计如此**，不是漏写。
+> 每个切片文件头部都写明了这一点。
+
+```
+tunnel_manager/
+├── _base.py            运行环境常量（平台判定 / 目录 / 端口 / 状态文件）+ 全部标准库 import
+├── _slices.py          切片清单与拼装（开发期与构建期共用）
+├── main.py             开发期入口：拼装后 exec 进一个命名空间执行
+├── consts.py           软件识别知识库(48 条) / 接口命名规律 / 保留地址段
+├── util.py             通用工具：run / run_ps / _sh / run_root / 提权能力探测
+├── detect/             识别引擎（四层证据融合）
+│   ├── process.py      ① 进程证据   ② 接口证据见 iface.py
+│   ├── iface.py        ② 接口证据（IPv4 + 命名 + MTU + ULA 指纹）
+│   ├── route.py        ③ 路由证据（默认路由 + 聚合路由多点抽查 PROBE_TARGETS）
+│   ├── judge.py        归属判定 classify_tunnel（证据融合）
+│   └── scan.py         统一扫描 do_scan / scan_mac / scan_win
+├── config.py           配置读写（读-改-写）/ 域名解析 / 自动追踪参数 / 假 IP 池规则
+├── autotrack.py        浏览器历史 → 目标域名（含 auto_status 上报）
+├── outlet/             出口管理（三个可控点）
+│   ├── scene.py        情景判定 + ATRUST_JOBS / ATRUST_PLISTS
+│   ├── scene_ops.py    情景切换 / 残留路由清理
+│   ├── manager.py      出口发现 + 关闭方式显式表 OUTLET_RULES
+│   ├── routes.py       路由表读取 / bypass 目标计算
+│   └── apply.py        do_apply / do_undo / do_daemon
+├── win/                Windows 适配
+│   ├── probe.py        PowerShell 可用性探测 + 原生缓存
+│   ├── nat_net.py      原生回退：接口 / 路由表 / 邻居表（route print · netsh · arp）
+│   ├── nat_sys.py      原生回退：服务 / 进程 / 系统 VPN + 提权 run_elevated_win
+│   ├── apps.py         服务枚举 / 启停
+│   ├── outlets.py      出口探测与提权脚本拼装
+│   ├── switch.py       出口启停切换 + launchd 作业启停（带失败回滚）
+│   └── identify.py     出口指纹
+├── health/             体检
+│   ├── probe.py        基座：本地地址映射 / 首跳 / 并发 / 真值目标
+│   ├── dns.py          DNS 读取与直查
+│   ├── egress.py       出口真值
+│   ├── trace.py        do_trace（只观测不声明）
+│   ├── snapshot.py     健康基线快照 + 假 IP 池路由
+│   ├── rescue.py / rescue_win.py   一键应急恢复（双平台）
+│   └── flowrate.py     实时流速采样
+├── steam/              Steam 三网体检
+│   ├── paths.py  api.py  trace.py  sdr.py  capture.py  summary.py  commands.py
+└── web/httpd.py        HTTP 服务（Host/Origin/CSRF 校验）+ 路由表 + 前端内嵌
 ```
 
 **HTTP API**：
 
+所有端点同时挂在两个前缀下，**老路径继续有效**（用户可能存了书签或写了脚本）：
+
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/api/scan` | 只读扫描（免管理员） |
+| GET | `/api/scan` | 只读扫描（免管理员）。含 `priv` 字段告知当前是否只读 |
 | GET/POST | `/api/config` | 读/写域名配置 |
+| GET | `/api/flow` | 实时流速采样（只读） |
 | POST | `/api/sudo` | (mac) 验证并缓存 sudo 密码 |
 | POST | `/api/auto/enable` | 开启自动追踪（扫浏览器历史） |
 | POST | `/api/auto/disable` | 关闭自动追踪并清空追踪集 |
@@ -158,12 +207,20 @@ universal-tunnel-manager/
 | POST | `/api/auto/unpin` | 立刻停止追踪某个域名 |
 | POST | `/api/outlet/switch` | **切到某个出口**（body `{key}`）：停掉其它在跑的 + 启动目标 + 清残留路由 |
 | POST | `/api/outlet/start` · `/api/outlet/stop` | 单独启 / 停某个出口（body `{key}`） |
-| POST | `/api/scene/game` | （旧）等价于 switch 到加速器 |
-| POST | `/api/scene/campus` | （旧）等价于 switch 到 aTrust |
+| POST | `/api/outlet/identify` · `/api/outlet/forget` · `/api/outlet/cancel` | 识别归属 / 遗忘记忆 / 取消这次切换 |
+| POST | `/api/scene/game` | （旧）等价于 switch 到加速器。**当前前端未调用**，仅接口保留 |
+| POST | `/api/scene/campus` | （旧）等价于 switch 到 aTrust。同上 |
 | POST | `/api/apply` | 全部域名 → 本机直连 |
 | POST | `/api/undo` | 撤销直连 → 交回隧道 |
 | POST | `/api/daemon/install` / `remove` | (mac) 装/卸守护 |
+| POST | `/api/trace` | 真实流量体检 |
+| POST | `/api/rescue` | 一键应急恢复 |
+| POST | `/api/health/save` | 保存健康基线 |
+| POST | `/api/steam/probe` · `/api/steam/diagnose` | Steam 三网体检 |
+| POST | `/api/steam/capture/start` · `stop` / GET `/api/steam/capture/result` | 抓包采样 |
+| GET | `/api/steam/overview` | Steam 概览摘要 |
 
+> 加版本前缀只影响路径写法：`/api/v1/scan` 与 `/api/scan` 等价。
 > 所有写接口（POST）都需同时带合法 `Origin`/`Referer` 与 `X-TM-Token`，否则 403。
 
 ---
@@ -182,7 +239,7 @@ universal-tunnel-manager/
 
 ### 6.1 默认域名表（开箱即用）
 
-`server.py` 的 `DEFAULT_DOMAINS` 预置了几个**通用示例站点**，首启即生效：
+`tunnel_manager/config.py` 的 `DEFAULT_DOMAINS` 预置了几个**通用示例站点**，首启即生效：
 
 | 分组 | 域名 |
 |---|---|
@@ -654,7 +711,7 @@ Windows 的提权是弹 UAC，**没有密码可输**。所以后端对前端用�
 
 ### 解决办法：只吃 System32 里的原生命令
 
-新增一层 `_nat_*` 解析（`server.py` 第四节末尾），**优先 PowerShell，
+新增一层 `_nat_*` 解析（`tunnel_manager/win/nat_net.py` 与 `nat_sys.py`），**优先 PowerShell，
 探测到不可用就整体切到原生命令**。选命令时刻意挑「不受系统语言影响」的部分：
 
 | 要读什么 | 原生命令 | 为什么挑它 |
@@ -830,7 +887,7 @@ TunnelManager-Windows-lite/         （精简版）
 **没有 Windows 机器时怎么验证**（本次用过的三步）：
 
 1. 解 `runtime/python313.zip` 查 stdlib —— ⚠️ 它是 **`.pyc` 预编译**的，按 `.py` 查会**全部 MISS**。
-   对着 `server.py` 的 import 逐个查 `.pyc` 即可。两个"假 MISS"要知道：
+   对着组装后单文件（`dist/tunnel-manager.py`）顶部的 import 逐个查 `.pyc` 即可 —— 这组 import 逐字来自 `tunnel_manager/_base.py`，切片里是**不再重复 import** 的（见第四节）。两个"假 MISS"要知道：
    **`time` 是内建**（在 `sys.builtin_module_names` 里，本来就没有 .pyc）；
    **`encodings/cp936.pyc` 不存在也正常**（`aliases.py` 把 cp936 指向 gbk）。
 2. **隔离模式试跑**（最有价值的一步）：`python3 -I -S -X utf8 dist/tunnel-manager.py`

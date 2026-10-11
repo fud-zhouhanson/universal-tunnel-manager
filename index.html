@@ -1189,7 +1189,7 @@ function render(s) {
   const oc = $('outletCount');
   if (oc) oc.textContent = outCnt ? outCnt + ' 个出口' : '';
 
-  // Steam 体检：用 /api/scan 里的轻量摘要刷新概览（不含网络探测，不拖慢扫描）
+  // Steam 体检：用 /api/v1/scan 里的轻量摘要刷新概览（不含网络探测，不拖慢扫描）
   renderSteam(s.steam);
 
   // 检测到的软件
@@ -1385,7 +1385,7 @@ async function refresh(opts) {
   scanBusy = true;
   beginScan(verbose || !firstScanDone);
   try {
-    render(await (await fetch('/api/scan')).json());
+    render(await (await fetch('/api/v1/scan')).json());
     firstScanDone = true;
   } catch (e) {
     const rty = $('btnRetry'); if (rty) rty.style.display = '';
@@ -1565,28 +1565,28 @@ async function doAction(path, label) {
 
 $('btnApply').onclick = () => {
   if (isWindows) toast('Windows 将弹出 UAC 确认框，点是即可', 4000);
-  doAction('/api/apply', '切换到本机直连');
+  doAction('/api/v1/apply', '切换到本机直连');
 };
 
 $('btnUndo').onclick = () => {
   if (isWindows) toast('Windows 将弹出 UAC 确认框，点是即可', 4000);
-  doAction('/api/undo', '交回隧道');
+  doAction('/api/v1/undo', '交回隧道');
 };
 $('btnDaemonInstall').onclick = async () => {
   if (!confirm('装守护会新增 LaunchDaemon 并写入 /usr/local/bin，属于系统配置改动。确认继续？')) return;
-  doAction('/api/daemon/install', '安装守护');
+  doAction('/api/v1/daemon/install', '安装守护');
 };
-$('btnDaemonRemove').onclick = () => doAction('/api/daemon/remove', '卸载守护');
+$('btnDaemonRemove').onclick = () => doAction('/api/v1/daemon/remove', '卸载守护');
 $('btnRescan').onclick = () => refresh({ verbose: true });
 $('outletList').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.sw) switchOutlet('/api/outlet/switch', b.dataset.sw);
-  else if (b.dataset.undo) switchOutlet('/api/outlet/cancel', b.dataset.undo, '取消这次切换');
-  else if (b.dataset.stop) switchOutlet('/api/outlet/stop', b.dataset.stop);
-  else if (b.dataset.start) switchOutlet('/api/outlet/start', b.dataset.start);
-  else if (b.dataset.id) switchOutlet('/api/outlet/identify', b.dataset.id);
-  else if (b.dataset.forget) switchOutlet('/api/outlet/forget', b.dataset.forget, '遗忘记忆');
+  if (b.dataset.sw) switchOutlet('/api/v1/outlet/switch', b.dataset.sw);
+  else if (b.dataset.undo) switchOutlet('/api/v1/outlet/cancel', b.dataset.undo, '取消这次切换');
+  else if (b.dataset.stop) switchOutlet('/api/v1/outlet/stop', b.dataset.stop);
+  else if (b.dataset.start) switchOutlet('/api/v1/outlet/start', b.dataset.start);
+  else if (b.dataset.id) switchOutlet('/api/v1/outlet/identify', b.dataset.id);
+  else if (b.dataset.forget) switchOutlet('/api/v1/outlet/forget', b.dataset.forget, '遗忘记忆');
 });
 
 $('domainEditor').addEventListener('input', () => {
@@ -1597,7 +1597,7 @@ $('btnSaveDomains').onclick = async () => {
   if (!domains.length) { toast('域名列表不能为空'); return; }
   toast('保存中…', 1500);
   try {
-    const [r, j] = await postJson('/api/config', { domains });
+    const [r, j] = await postJson('/api/v1/config', { domains });
     if (r.ok) {
       delete $('domainEditor').dataset.dirty;
       toast('已保存并重新扫描');
@@ -1730,12 +1730,12 @@ async function autoAct(path, domain, pending) {
 $('autoChips').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.promote) autoAct('/api/auto/promote', b.dataset.promote, '转正中…');
-  else if (b.dataset.unpin) autoAct('/api/auto/unpin', b.dataset.unpin, '停止追踪中…');
+  if (b.dataset.promote) autoAct('/api/v1/auto/promote', b.dataset.promote, '转正中…');
+  else if (b.dataset.unpin) autoAct('/api/v1/auto/unpin', b.dataset.unpin, '停止追踪中…');
 });
 
-$('btnAutoEnable').onclick = () => doAction('/api/auto/enable', '开启自动追踪');
-$('btnAutoDisable').onclick = () => doAction('/api/auto/disable', '关闭自动追踪');
+$('btnAutoEnable').onclick = () => doAction('/api/v1/auto/enable', '开启自动追踪');
+$('btnAutoDisable').onclick = () => doAction('/api/v1/auto/disable', '关闭自动追踪');
 $('btnQuickAdd').onclick = async () => {
   const raw = $('quickDomainInput').value.trim();
   if (!raw) { toast('先输入一个域名，如 www.example.com'); return; }
@@ -1744,7 +1744,7 @@ $('btnQuickAdd').onclick = async () => {
   if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(d)) { toast('域名格式不对，检查一下：' + d); return; }
   toast('加入追踪中…', 1500);
   try {
-    const [r, j] = await postJson('/api/auto/pin', { domain: d });
+    const [r, j] = await postJson('/api/v1/auto/pin', { domain: d });
     if (r.ok) {
       $('quickDomainInput').value = '';
       toast(j.message || '已加入追踪');
@@ -1767,7 +1767,7 @@ $('pwOk').onclick = async () => {
   const pw = $('pwInput').value;
   $('pwModal').classList.remove('show');
   try {
-    const r = await fetch('/api/sudo', {
+    const r = await fetch('/api/v1/sudo', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-TM-Token': csrfToken },
       body: JSON.stringify({ password: pw })
@@ -1933,7 +1933,7 @@ if (traceBtn) traceBtn.onclick = async () => {
   const box = $('traceOut');
   box.innerHTML = '<div class="skel"><span class="spin"></span> 正在体检：真解析一次、真连一次、真看第一跳…</div>';
   try {
-    const [r, j] = await postJson('/api/trace');
+    const [r, j] = await postJson('/api/v1/trace');
     if (!j.ok) { box.innerHTML = '<div class="empty">' + esc(j.error || '体检失败') + '</div>'; return; }
     renderTrace(j.trace);
   } catch (e) {
@@ -2049,10 +2049,10 @@ async function doRescue() {
   const box = $('rescueOut');
   box.innerHTML = '<div class="skel"><span class="spin"></span> 正在应急恢复…</div>';
   try {
-    const [r, j] = await postJson('/api/rescue');
+    const [r, j] = await postJson('/api/v1/rescue');
     if (r.status === 403 && j.error === 'NEED_SUDO') {
       box.innerHTML = '<div class="sub">需要管理员密码才能改路由和 DNS</div>';
-      askPassword({ path: '/api/rescue', label: '一键应急恢复' });
+      askPassword({ path: '/api/v1/rescue', label: '一键应急恢复' });
       return;
     }
     if (r.status === 403 && j.error === 'NEED_ADMIN') {
@@ -2113,7 +2113,7 @@ const saveHealthBtn = $('btnSaveHealth');
 if (saveHealthBtn) saveHealthBtn.onclick = async () => {
   toast('保存中…', 1500);
   try {
-    const [r, j] = await postJson('/api/health/save');
+    const [r, j] = await postJson('/api/v1/health/save');
     if (r.ok) {
       toast(j.message || '健康基线已保存');
       if (j.result) render(j.result); else refresh();
@@ -2158,7 +2158,7 @@ function viaTag(via) {
   return `<span class="tag ${cls}">${esc(v || '未知')}</span>`;
 }
 
-/* ── 概览：来自 /api/scan 的轻量摘要（不含网络探测，不拖慢扫描）── */
+/* ── 概览：来自 /api/v1/scan 的轻量摘要（不含网络探测，不拖慢扫描）── */
 function renderSteam(st) {
   if (!st) return;
   const badge = $('steamBadge'), meta = $('steamMeta'), grid = $('steamMetrics');
@@ -2203,7 +2203,7 @@ function renderSteam(st) {
 /* ── 快照：只读 Steam 自己写的日志，秒出 ── */
 async function steamOverview() {
   try {
-    const j = await (await fetch('/api/steam/overview')).json();
+    const j = await (await fetch('/api/v1/steam/overview')).json();
     if (!j.ok) { steamErr(j.error || '快照失败'); return; }
     const env = j.env || {};
     if (!env.installed) { steamErr('没找到 Steam 安装目录，下面的检测都没有对象。'); return; }
@@ -2260,7 +2260,7 @@ async function steamProbe() {
   if (sk2) { sk2.style.display = ''; sk2.textContent = '探测中…'; }
   toast('正在探测（约 10~20 秒）…', 2500);
   try {
-    const [, j] = await postJson('/api/steam/probe', wantRefresh ? { refresh: true } : {});
+    const [, j] = await postJson('/api/v1/steam/probe', wantRefresh ? { refresh: true } : {});
     if (j.error) { steamErr(j.error); return; }
     renderCmTable(j.cm || []);
     renderRelays(j);
@@ -2429,7 +2429,7 @@ async function capStart() {
   const sel = $('capSecs');
   const secs = parseInt((sel && sel.value) || '60', 10);
   try {
-    const [r, j] = await postJson('/api/steam/capture/start', { seconds: secs });
+    const [r, j] = await postJson('/api/v1/steam/capture/start', { seconds: secs });
     toast(j.message || (r.ok ? '已开始采样' : '开始失败'), 6000);
     if (j.capture) renderCapture(j.capture);
     else capStatus({ running: true, seconds: secs, elapsed: 0, samples: 0 });
@@ -2439,7 +2439,7 @@ async function capStart() {
 
 async function capStop() {
   try {
-    const [, j] = await postJson('/api/steam/capture/stop', {});
+    const [, j] = await postJson('/api/v1/steam/capture/stop', {});
     toast(j.message || '已请求停止', 5000);
     if (j.capture) renderCapture(j.capture);
   } catch (e) { toast('停止出错：' + (e.message || e), 6000); }
@@ -2449,7 +2449,7 @@ function scheduleCapPoll() {
   if (capPollTimer) return;
   capPollTimer = setInterval(async () => {
     try {
-      const cap = await (await fetch('/api/steam/capture/result')).json();
+      const cap = await (await fetch('/api/v1/steam/capture/result')).json();
       renderCapture(cap);
       if (!cap.running) { clearInterval(capPollTimer); capPollTimer = null; }
     } catch (e) { clearInterval(capPollTimer); capPollTimer = null; }
@@ -2463,7 +2463,7 @@ async function steamDiagnose() {
   if (btn) btn.disabled = true;
   if (out) out.innerHTML = '<div class="skel">诊断中…（会顺带做一次实时探测，约 10~20 秒）</div>';
   try {
-    const [, j] = await postJson('/api/steam/diagnose', {});
+    const [, j] = await postJson('/api/v1/steam/diagnose', {});
     if (j.error) {
       if (out) out.innerHTML = '<div class="empty">诊断失败：' + esc(j.error) + '</div>';
       return;
@@ -2660,7 +2660,7 @@ function renderFlow(f) {
 
 async function pollFlow() {
   try {
-    renderFlow(await (await fetch('/api/flow')).json());
+    renderFlow(await (await fetch('/api/v1/flow')).json());
   } catch (e) {
     const meta = $('flowMeta');
     if (meta) meta.textContent = '取数失败';

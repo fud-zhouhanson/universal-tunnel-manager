@@ -882,6 +882,105 @@ def check_rules():
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def check_api():
+    """十四、HTTP 端点表与前端调用是否对得上。
+
+    这一节守的是「前端点了个不存在的接口」这类问题 —— 症状通常是某个按钮
+    毫无反应 / 报 404，而控制台不在这台机器上，靠肉眼很难发现。
+    这里把三件事一次性钉住：
+
+      ① 服务端路由表里的每个路径都能落到一个真实方法上；
+      ② `/api/v1/xxx` 与 `/api/xxx` 等价（版本前缀是别名，老路径不许失效）；
+      ③ 前端页面里出现的每一个接口路径，服务端都认。
+
+    全程只读：不启动服务、不发任何网络请求。
+    """
+    sec("十四、HTTP 端点表与前端接口对账")
+    if not os.path.isfile(APP):
+        skip("HTTP 端点表", "app/tunnel-manager.py 不存在")
+        return
+    try:
+        mod = load_app()
+    except Exception as e:                  # noqa: BLE001
+        fail("加载模块（端点表）", "%s: %s" % (type(e).__name__, e))
+        return
+
+    handler = getattr(mod, "Handler", None)
+    if handler is None:
+        fail("HTTP 端点表", "模块里找不到 Handler")
+        return
+
+    get_routes = getattr(handler, "GET_ROUTES", None)
+    post_routes = getattr(handler, "POST_ROUTES", None)
+    if not isinstance(get_routes, dict) or not isinstance(post_routes, dict):
+        fail("HTTP 端点表",
+             "Handler 上没有 GET_ROUTES / POST_ROUTES —— "
+             "这份 app/tunnel-manager.py 是「路由表」改造之前的旧版，"
+             "请用同一批下载里的新包重新解压一份再跑")
+        return
+
+    # ① 表里每一条都能落到真实方法
+    broken = []
+    for method_name, table in (("GET", get_routes), ("POST", post_routes)):
+        for path, fn in sorted(table.items()):
+            if not path.startswith("/api/"):
+                broken.append("%s %s（路径不以 /api/ 开头）" % (method_name, path))
+            elif not callable(getattr(handler, fn, None)):
+                broken.append("%s %s → 找不到方法 %s" % (method_name, path, fn))
+    if broken:
+        fail("路由表指向真实方法", "；".join(broken[:6]))
+    else:
+        ok("路由表指向真实方法",
+           "读端点 %d 条、写端点 %d 条，全部有对应方法"
+           % (len(get_routes), len(post_routes)))
+
+    # ② 版本前缀是别名
+    api_path = getattr(mod, "api_path", None)
+    if not callable(api_path):
+        fail("接口版本前缀", "模块里没有 api_path()，无法确认 /api/v1/ 是否等价")
+    else:
+        cases = [("/api/v1/scan", "/api/scan"),
+                 ("/api/v1/steam/capture/result", "/api/steam/capture/result"),
+                 ("/api/scan", "/api/scan"),
+                 ("/", "/"), ("/index.html", "/index.html")]
+        wrong = [(a, api_path(a), b) for a, b in cases if api_path(a) != b]
+        if wrong:
+            fail("接口版本前缀",
+                 "这些归一化结果不对：%s" % "、".join(
+                     "%s→%s（应为 %s）" % w for w in wrong))
+        else:
+            ok("接口版本前缀",
+               "/api/v1/xxx 与 /api/xxx 等价；老路径 %d 条继续可用（含根路径不受影响）"
+               % len(get_routes))
+
+    # ③ 前端用到的路径，服务端必须都认
+    try:
+        html = mod.get_html()
+    except Exception as e:                  # noqa: BLE001
+        fail("取前端页面", "%s: %s" % (type(e).__name__, e))
+        html = ""
+    if not html:
+        warn("前端接口对账", "拿不到页面内容（既没有 index.html 也没有内嵌副本），跳过")
+    else:
+        import re as _re
+        known = set(get_routes) | set(post_routes)
+        used = set()
+        for _pre, rest in _re.findall(r"(/api/(?:v1/)?)([A-Za-z0-9_/]+)", html):
+            used.add("/api/" + rest.strip("/"))
+        missing = sorted(p for p in used if p not in known)
+        if missing:
+            fail("前端接口对账",
+                 "页面里调了服务端没有的接口：%s —— "
+                 "点了这些按钮会 404（什么都没发生）" % "、".join(missing))
+        else:
+            unused = sorted(known - used)
+            msg = "页面用到 %d 个接口，服务端全都认" % len(used)
+            if unused:
+                msg += "；另有 %d 个服务端接口页面暂时没用到（%s）" % (
+                    len(unused), "、".join(unused[:4]))
+            ok("前端接口对账", msg)
+
+
 def render():
     counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "SKIP": 0, "INFO": 0, "SEC": 0}
     for lv, _n, _d in R:
@@ -1148,7 +1247,7 @@ def main():
     for fn in (check_system, check_encoding, check_runtime, check_files,
                check_cmds, check_ports, check_httpserver, check_dns,
                check_app_real, check_clients, check_outlets, check_win_env,
-               check_rules):
+               check_rules, check_api):
         try:
             fn()
         except BaseException as e:      # noqa: BLE001 —— 单项崩了不能拖垮整份报告
