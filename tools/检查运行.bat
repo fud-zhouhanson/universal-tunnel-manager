@@ -7,10 +7,15 @@ pushd "%~dp0" 2>nul || goto nocwd
 
 if not exist "selftest.py" goto noself
 
+rem 依次找一个真能用的 Python 3：本包 runtime / 上一级 runtime / 系统里的
+rem （用"真的执行一句 import sys"来验证 —— 商店版的 python.exe 是个存根，
+rem   只 where 出来没用，跑起来会弹应用商店）
 set PY=
-if exist "runtime\python.exe" set PY=runtime\python.exe
-if not defined PY if exist "..\runtime\python.exe" set PY=..\runtime\python.exe
-if not defined PY ( where python >nul 2>&1 && set PY=python )
+if exist "runtime\python.exe" set PY="runtime\python.exe"
+if not defined PY if exist "..\runtime\python.exe" set PY="..\runtime\python.exe"
+if not defined PY call :trypy "py -3"
+if not defined PY call :trypy "python"
+if not defined PY call :trypy "python3"
 if not defined PY goto nopy
 
 echo.
@@ -19,7 +24,7 @@ echo   正在检查，大约 10 到 40 秒，请稍等 ...
 echo.
 
 rem -X utf8 必须带：详见 make_win_pkg.py 文件头的说明
-"%PY%" -X utf8 selftest.py
+%PY% -X utf8 selftest.py
 
 echo.
 echo   ------------------------------------------------------------
@@ -58,3 +63,8 @@ echo   当前目录： %CD%
 echo.
 pause
 exit /b 1
+
+:trypy
+%~1 -c "import sys" >nul 2>&1
+if %errorlevel%==0 set PY=%~1
+exit /b

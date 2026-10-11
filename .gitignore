@@ -3,7 +3,9 @@
 #   bash scripts/build.sh        → 下面这些全部（一条命令）
 #   python3 build.py             → dist/tunnel-manager.py(.zip)
 #   python3 make_tools.py        → tools/检查运行.bat(.command)
-#   python3 make_win_pkg.py      → dist/TunnelManager-Windows-x64.zip（10 MB，含 Python 运行时）
+#   python3 make_win_pkg.py      → dist/TunnelManager-Windows-x64.zip（10.4 MB，含 Python 运行时）
+#                                  dist/TunnelManager-Windows-lite.zip（162 KB，不含运行时）
+#                                  dist/运行检查工具.zip
 #   python3 make_download_page.py→ dist/download.html（分享用）
 #                                  docs/index.html（GitHub Pages 用 —— 注意：这一份要提交！）
 # ============================================================
@@ -11,6 +13,7 @@ dist/tunnel-manager.py
 dist/tunnel-manager.zip
 dist/TunnelManager-Windows-x64.zip
 dist/TunnelManager-Windows-x64.dat
+dist/TunnelManager-Windows-lite.zip
 dist/运行检查工具.zip
 dist/RunCheck-tool.zip
 dist/download.html
