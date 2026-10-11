@@ -111,10 +111,22 @@ echo "桌面快捷方式：$DESKTOP_APP"
 
 # ---- 顺便装一份自检工具（不往桌面加图标，免得占地方）----
 # 解压目录随时可能被删，所以把体检工具也放一份到安装目录，以后随时能跑。
-if [ -f "$SCRIPT_DIR/selftest.py" ]; then
-  cp "$SCRIPT_DIR/selftest.py" "$INSTALL_DIR/" 2>/dev/null
-  cp "$SCRIPT_DIR/检查运行.command" "$INSTALL_DIR/" 2>/dev/null
+#
+# 两个来源都要认：
+#   · 分发包里  —— selftest.py 就在本脚本旁边（zip 根目录）
+#   · 仓库里直接跑（bash dist/install.sh）—— 它们在 ../tools/
+# 只认第一处的话，本机那份会在"第一次装完之后"永远停在旧版本，
+# 之后每次体检都拿旧工具查新程序 —— 正是本项目反复踩的"以为改了，其实跑的是旧版"。
+ST_SRC=""; CHK_SRC=""
+for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/../tools"; do
+  [ -z "$ST_SRC" ]  && [ -f "$_d/selftest.py" ]      && ST_SRC="$_d/selftest.py"
+  [ -z "$CHK_SRC" ] && [ -f "$_d/检查运行.command" ] && CHK_SRC="$_d/检查运行.command"
+done
+if [ -n "$ST_SRC" ]; then
+  cp "$ST_SRC" "$INSTALL_DIR/" 2>/dev/null
+  [ -n "$CHK_SRC" ] && cp "$CHK_SRC" "$INSTALL_DIR/" 2>/dev/null
   chmod +x "$INSTALL_DIR/检查运行.command" 2>/dev/null
+  echo "自检工具：$ST_SRC"
 fi
 
 # ---- 立即启动？----
