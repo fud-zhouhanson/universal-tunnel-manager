@@ -125,7 +125,7 @@ universal-tunnel-manager/
 ├── tunnel-manager.command  macOS 双击启动
 └── dist/               分发产物（给自己或别人用）
     ├── tunnel-manager.py    单文件版（内嵌前端，整包只此一个 .py）
-    ├── tunnel-manager.zip   打包下载（含 py + 双平台安装脚本 + README）
+    ├── tunnel-manager.zip   打包下载（含 py + 双平台安装脚本 + README.txt）
     ├── TunnelManager-Windows-x64.zip   Windows 免安装版（内置运行时）
     ├── TunnelManager-Windows-lite.zip  Windows 精简版（需对方已装 Python 3）
     ├── 运行检查工具.zip       可单独发的体检小包
