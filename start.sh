@@ -1,7 +1,7 @@
 #!/bin/bash
 # Universal Tunnel Manager — macOS 一键启动
 # 双击此文件即可：自动找 Python → 启动服务 → 打开浏览器
-# 原理：先探测可用 python3，后台拉起 server.py，等端口起来后打开链接
+# 原理：先探测可用 python3，后台拉起 tunnel_manager 包，等端口起来后打开链接
 
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +22,7 @@ echo "启动 Universal Tunnel Manager..."
 
 # 后台启动服务，记录日志
 LOG="$DIR/tunnel-manager.log"
-"$PY" "$DIR/server.py" > "$LOG" 2>&1 &
+"$PY" -m tunnel_manager.main > "$LOG" 2>&1 &
 SRV_PID=$!
 
 # 等服务起来（最多 15 秒），从输出里抓链接

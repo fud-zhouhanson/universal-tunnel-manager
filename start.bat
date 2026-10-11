@@ -16,7 +16,7 @@ if not defined PY goto nopy
 echo 使用 Python: %PY%
 echo 正在启动 Universal Tunnel Manager ...
 
-start /b "" %PY% "%~dp0server.py" > "%~dp0tunnel-manager.log" 2>&1
+start /b "" %PY% -m tunnel_manager.main > "%~dp0tunnel-manager.log" 2>&1
 
 set URL=
 for /l %%i in (1,1,30) do (

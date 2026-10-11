@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build.py — 把 server.py + index.html 打包成单文件分发版 tunnel-manager.py
+build.py — 把 tunnel_manager/ 包 + index.html 打包成单文件分发版
 
 用法：
     python3 build.py
@@ -8,50 +8,33 @@ build.py — 把 server.py + index.html 打包成单文件分发版 tunnel-manag
 产物：
     dist/tunnel-manager.py   单文件版，不再依赖外部 index.html
     dist/tunnel-manager.zip  压缩包，方便下载
+
+单文件组装本身在 bundle.py（它与开发期入口共用 tunnel_manager/_slices.py，
+不搞两套实现）；本脚本只负责「组装 + 补上随包分发的辅助文件 + 打 zip」。
 """
 
-import base64
 import os
-import shutil
 import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "server.py")
+PKG = os.path.join(HERE, "tunnel_manager")
 HTML = os.path.join(HERE, "index.html")
 DIST = os.path.join(HERE, "dist")
 OUT_PY = os.path.join(DIST, "tunnel-manager.py")
 OUT_ZIP = os.path.join(DIST, "tunnel-manager.zip")
 
-MARKER = "EMBEDDED_HTML = None"
+sys.path.insert(0, HERE)
+import bundle  # noqa: E402
 
 
 def main():
-    if not os.path.isfile(SERVER):
-        sys.exit("找不到 server.py")
+    if not os.path.isdir(PKG):
+        sys.exit("找不到 tunnel_manager/ 包")
     if not os.path.isfile(HTML):
         sys.exit("找不到 index.html")
 
-    with open(SERVER, encoding="utf-8") as f:
-        src = f.read()
-    if MARKER not in src:
-        sys.exit("server.py 里找不到 EMBEDDED_HTML 占位符")
-
-    with open(HTML, encoding="utf-8") as f:
-        html = f.read()
-
-    # base64 存储，避免 HTML 里的引号/反斜杠/三引号冲突
-    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-    replacement = (
-        "EMBEDDED_HTML = __import__(\"base64\").b64decode("
-        f"\"{b64}\").decode(\"utf-8\")"
-    )
-    out = src.replace(MARKER, replacement, 1)
-
-    os.makedirs(DIST, exist_ok=True)
-    with open(OUT_PY, "w", encoding="utf-8") as f:
-        f.write(out)
-    os.chmod(OUT_PY, 0o755)
+    bundle.build_into(OUT_PY)
 
     # zip 包：主程序 + 双平台安装脚本 + 双平台自检工具 + 说明
     extras = {
@@ -95,9 +78,9 @@ def main():
                 print(f"  [警告] 缺少 {path}，跳过")
         z.writestr("README.txt", readme)
 
-    print(f"构建完成：")
-    print(f"  {OUT_PY}  ({os.path.getsize(OUT_PY)/1024:.0f} KB)")
-    print(f"  {OUT_ZIP} ({os.path.getsize(OUT_ZIP)/1024:.0f} KB)")
+    print("构建完成：")
+    print(f"  {OUT_PY}  ({os.path.getsize(OUT_PY) / 1024:.0f} KB)")
+    print(f"  {OUT_ZIP} ({os.path.getsize(OUT_ZIP) / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":
