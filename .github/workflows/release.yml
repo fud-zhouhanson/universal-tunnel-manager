@@ -52,8 +52,12 @@ jobs:
         with:
           # 附件名全部用 ASCII：gh CLI 曾把中文名改成 default.zip，
           # 而 GitHub Pages 与 releases/latest/download/<name> 直链都依赖固定文件名。
+          # ⚠️ 落地页里有四个下载控件，文件名必须与此处**逐个对得上** ——
+          #    少一个，那条 releases/latest/download/<name> 直链就 404
+          #    （精简版曾因此 404 了整整几天）。
           files: |
             dist/TunnelManager-Windows-x64.zip
+            dist/TunnelManager-Windows-lite.zip
             dist/tunnel-manager.zip
             dist/RunCheck-tool.zip
             dist/SHA256SUMS

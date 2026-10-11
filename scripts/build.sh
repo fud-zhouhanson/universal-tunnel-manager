@@ -83,6 +83,32 @@ fi
     $HASH "$f"
   done > SHA256SUMS )
 
+# ------------------------------------------------------------
+# 直链自查：docs/index.html 里每条 releases/latest/download/<名>，
+# 对应的文件必须真的在 dist/ 里、且名字一字不差。
+#
+# 为什么值得单独查一次：Release 附件是「打 tag 时由 CI 按 .github/workflows/release.yml
+# 的 files: 列表上传」的，落地页却按自己的常量拼直链 —— 两边各写一份文件名，
+# 少一个就是一条**静默 404**（精简版就曾这样 404 了好几天，直到有人去点才被发现）。
+# 放在构建期查，drift 当天就暴露。
+# ------------------------------------------------------------
+echo "==> 自查落地页直链"
+"$PY" - "$DOCS/index.html" "$DIST" <<'PY'
+import os, re, sys
+page, dist = sys.argv[1], sys.argv[2]
+names = sorted(set(re.findall(r"releases/latest/download/([A-Za-z0-9._-]+)", open(page, encoding="utf-8").read())))
+if not names:
+    sys.exit("★ docs/index.html 里没找到任何 release 直链 —— 落地页可能没生成对")
+missing = [n for n in names if not os.path.isfile(os.path.join(dist, n))]
+for n in names:
+    print(f"   {'✓' if n not in missing else '✗'} dist/{n}")
+if missing:
+    sys.exit(f"★ 落地页引用了 {len(missing)} 个 dist/ 里不存在的附件：{', '.join(missing)}\n"
+             f"  改完请同时确认 .github/workflows/release.yml 的 files: 列表里有它们。")
+print(f"   {len(names)} 条直链都有对应产物")
+PY
+
+
 echo
 echo "=========== 完成 ==========="
 ls -la "$DIST"/*.zip "$DIST"/tunnel-manager.py 2>/dev/null || true
