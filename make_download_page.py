@@ -641,17 +641,21 @@ def main():
     _write(OUT_RELEASE, build_page("release"))
 
     # ---- 站点目录：把「部署源」需要的两份一并刷新 ----
-    # dist/site/ 是往云托管部署的那个目录，其中 index.html 与 tunnel-manager.zip
-    # 历来靠手工 cp —— 而"忘了 cp / 只 cp 没部署"是同一个反复踩的漏点。
-    # 收进构建里，site/ 就永远等于 dist/ 当前产物，只剩"记得部署"这一个动作。
+    # dist/site/ 是往云托管部署的那个目录。里面只需要两样东西：
+    #   · index.html            —— 就是 dist/download.html（自包含：小包已 base64 内嵌）
+    #   · *.dat                 —— Windows 包，页面用相对链接 ./…dat 取（改名绕 WAF）
+    # 其中 index.html 历来靠手工 cp，而"忘了 cp / 只 cp 没部署"是同一个反复踩的漏点，
+    # 所以收进构建里，site/ 永远等于 dist/ 当前产物。
+    #
+    # ⚠️ 刻意**不**往 site/ 放 tunnel-manager.zip：页面压根不引用它
+    #    （macOS 包与体检包都是 base64 内嵌的），而且平台 WAF 见 ".zip" 就 403 ——
+    #    放了只是个死的 403 文件，还多一个"忘了同步"的点。
     if os.path.isfile(OUT_EMBED):
         os.makedirs(SITE, exist_ok=True)
         _copy_over(OUT_EMBED, os.path.join(SITE, "index.html"))
-    if os.path.isfile(ZIP):
-        _copy_over(ZIP, os.path.join(SITE, os.path.basename(ZIP)))
 
     print(f"\n落地页已生成：{OUT_EMBED} / {OUT_RELEASE}")
-    print(f"部署源已刷新：{SITE}/")
+    print(f"部署源已刷新：{SITE}/（index.html + Windows .dat）")
 
 
 if __name__ == "__main__":
