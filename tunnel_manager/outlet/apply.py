@@ -67,6 +67,11 @@ def do_apply(pw=None):
         return False, "没有可用的公网 IP（可能解析失败或命中私网保护）"
 
     cmd_str = " ; ".join(cmds) if not IS_WIN else "\n".join(cmds)
+    # 前置探测：没权限就别再往下走（这台机器上解析域名要好几秒，
+    # 让用户干等之后才弹密码框，体感上就是「卡住了」）。
+    can, code, _t = priv_capability(pw)
+    if not can:
+        return None, code
     rc, out, err = run_root(cmd_str, pw)
     if rc == 403:
         return None, "NEED_SUDO"
@@ -131,6 +136,9 @@ def do_undo(pw=None):
 
     cmds = [route_del_cmd(ip) for ip in targets]
     cmd_str = " ; ".join(cmds) if not IS_WIN else "\n".join(cmds)
+    can, code, _t = priv_capability(pw)
+    if not can:
+        return None, code
     rc, out, err = run_root(cmd_str, pw)
     if rc == 403:
         return None, "NEED_SUDO"
@@ -181,6 +189,11 @@ def do_daemon(action, pw=None):
         return False, "找不到守护脚本（仅 macOS 提供守护，需安装 skill）"
     sub = "daemon-install" if action == "install" else "daemon-remove"
     cmd = f"bash {core} {sub}"
+    # 前置探测的意义在这里最实：daemon-install 是一支**多步**脚本
+    # （拷 plist → chown → launchctl load），做到一半失败会留下半个守护作业。
+    can, code, _t = priv_capability(pw)
+    if not can:
+        return None, code
     rc, out, err = run_root(cmd, pw)
     if rc == 403:
         return None, "NEED_SUDO"

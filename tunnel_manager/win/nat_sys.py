@@ -57,9 +57,12 @@ def _nat_registry_apps():
 
 
 def _nat_service_list():
-    """`sc query type= service state= all` —— 字段名恒为英文，不受语言影响。"""
+    """`sc query type= service state= all` —— 字段名恒为英文，不受语言影响。
+
+    retries=1：只读、正常 <1s，真机上有安全软件时偶发被拦一次是常态。
+    """
     rc, out, _ = run(["sc.exe", "query", "type=", "service", "state=", "all"],
-                     timeout=45)
+                     timeout=45, retries=1)
     if rc != 0 or not out:
         return []
     res, cur = [], None

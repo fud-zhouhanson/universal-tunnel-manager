@@ -19,8 +19,10 @@
 import base64
 import hashlib
 import importlib.util
+import json
 import os
 import platform
+import shutil
 import socket
 import struct
 import subprocess
@@ -699,6 +701,187 @@ def check_outlets():
 # ----------------------------------------------------------------------
 # 汇总输出
 # ----------------------------------------------------------------------
+def check_rules():
+    """十三、判定规则的「表格与边界」自检。
+
+    这一段守的是**看不见的退化**：程序里有两张表，一旦被改坏，
+    界面不会报错、只是悄悄少管一块公网或少查一类故障 —— 不写断言根本发现不了。
+
+      · 聚合路由抽查表 PROBE_TARGETS —— aTrust/雷神这类客户端不动默认路由，
+        靠「1/2/4/8…」拆分整段公网来接管的。表里少掉一整段，
+        就等于那一整块公网失去监控。
+      · 假 IP 池规则 —— 隧道把域名解析进 198.18.x.x 之类假 IP 的证据链。
+        这里曾经写成一个**永远匹配不上任何真实 IP** 的正则（结尾的 `$` 紧跟在
+        点号后面），检测一直是哑的，所以现在把边界钉在断言里。
+
+    另外顺带验证两件「防误伤」的事：
+      · launchd 标签 / plist 路径要拼进 root shell，白名单必须挡住注入；
+      · save_config 是读-改-写，不能把配置里其它键冲掉。
+
+    全程只读；唯一写操作在临时目录里，用完即删。
+    """
+    sec("十三、判定规则与边界（聚合抽查表 / 假 IP 池 / 提权探测）")
+    if not os.path.isfile(APP):
+        skip("判定规则", "app/tunnel-manager.py 不存在")
+        return
+    try:
+        mod = load_app()
+    except Exception as e:                  # noqa: BLE001
+        fail("加载模块（判定规则）", "%s: %s" % (type(e).__name__, e))
+        return
+
+    # ---- 1. 聚合路由抽查表 ----
+    targets = getattr(mod, "PROBE_TARGETS", None)
+    if not isinstance(targets, (list, tuple)) or not targets:
+        fail("聚合路由抽查表", "程序里找不到 PROBE_TARGETS —— 这份包太旧，请用同一批下载里的新包")
+    else:
+        bad = [str(t) for t in targets
+               if not isinstance(t, str) or mod.ip_to_int(t) is None]
+        if bad:
+            fail("抽查点是合法 IPv4", "这些不是：%s" % "、".join(bad))
+        elif len(set(targets)) != len(targets):
+            fail("抽查点无重复", "有重复项：%d 个点里只有 %d 个不同"
+                 % (len(targets), len(set(targets))))
+        else:
+            ok("抽查点是合法 IPv4 且无重复", "%d 个探测点" % len(targets))
+
+        try:
+            first = [int(str(t).split(".")[0]) for t in targets]
+            segs = [
+                ("0.0.0.0/1（0–127）", sum(1 for o in first if o < 128)),
+                ("128.0.0.0/2（128–191）", sum(1 for o in first if 128 <= o < 192)),
+                ("192.0.0.0/3（192–223）", sum(1 for o in first if 192 <= o < 224)),
+                ("240.0.0.0/4（240–255）", sum(1 for o in first if o >= 240)),
+            ]
+            empty = [n for n, c in segs if c == 0]
+            blocks = len({o >> 4 for o in first})
+            if empty:
+                fail("聚合路由段覆盖完整",
+                     "这些段一个探测点都没有：%s —— "
+                     "等于那一整块公网不会被抽查到" % "、".join(empty))
+            elif blocks < 10:
+                fail("聚合路由段覆盖足够散", "只覆盖了 %d 个 /4 块（应 ≥10）" % blocks)
+            else:
+                ok("聚合路由段覆盖完整",
+                   "四个聚合段都有点（%s），散布在 %d 个 /4 块里"
+                   % ("、".join("%s×%d" % (n.split("（")[0], c) for n, c in segs), blocks))
+            multicast = sum(1 for o in first if 224 <= o < 240)
+            if multicast:
+                warn("组播段 224.0.0.0/4", "有 %d 个探测点落在组播段 —— "
+                     "客户端不会接管组播，这些点探不出东西" % multicast)
+            else:
+                info("组播段 224.0.0.0/4", "按设计不设点（客户端不接管组播）")
+        except Exception as e:              # noqa: BLE001
+            fail("聚合路由段覆盖核算", "%s: %s" % (type(e).__name__, e))
+
+    # ---- 2. 假 IP 池规则 ----
+    host_re, net_re = getattr(mod, "is_fake_pool_host", None), getattr(mod, "is_fake_pool_net", None)
+    if not host_re or not net_re:
+        fail("假 IP 池规则", "程序里找不到 is_fake_pool_host / is_fake_pool_net —— 这份包太旧")
+    else:
+        # (地址, 期望) —— 左边是隧道惯用的假 IP 池，右边是真公网，必须放过
+        host_cases = [
+            ("198.18.3.5", True), ("198.19.255.1", True), ("100.64.1.1", True),
+            ("240.0.0.7", True), ("127.0.0.1", True), ("169.254.1.1", True),
+            ("8.8.8.8", False), ("1.1.1.1", False), ("100.130.1.1", False),
+            ("198.20.1.1", False),
+        ]
+        wrong = [(ip, mod.is_fake_pool_host(ip), want)
+                 for ip, want in host_cases if mod.is_fake_pool_host(ip) != want]
+        if wrong:
+            fail("假 IP 池（域名解析侧）",
+                 "判定不对：%s；" % "、".join(
+                     "%s 得到 %s 应为 %s" % w for w in wrong) +
+                 "注：这一项过去因为正则写错而**从不命中**，"
+                 "若这里报错说明规则被改坏了。")
+        else:
+            ok("假 IP 池（域名解析侧）", "%d 个边界判定全对" % len(host_cases))
+
+        # net 侧刻意收窄：宁可漏判，也绝不能删 169.254/16 这类合法链路本地路由
+        net_cases = [("198.18.0.0", True), ("100.64.0.0", True), ("240.0.0.0", True),
+                     ("169.254.0.0", False), ("100.70.0.0", False),
+                     ("8.8.8.0", False), ("0.0.0.0", False)]
+        wrong = [(d, mod.is_fake_pool_net(d), want)
+                 for d, want in net_cases if mod.is_fake_pool_net(d) != want]
+        if wrong:
+            fail("假 IP 池（路由侧，刻意收窄）",
+                 "判定不对：%s" % "、".join("%s 得到 %s 应为 %s" % w for w in wrong))
+        else:
+            ok("假 IP 池（路由侧，刻意收窄）",
+               "%d 个边界判定全对（169.254 / 100.70+ 都放过，不会误删合法路由）"
+               % len(net_cases))
+
+    # ---- 3. launchd 标签白名单（拼进 root shell 前的注入防线）----
+    safe_fn = getattr(mod, "_safe_launchd_tokens", None)
+    if not safe_fn:
+        info("launchd 标签白名单", "这份包里还没有这个函数（旧版），跳过")
+    else:
+        good = ["system/com.sangfor.aTrustTunnel",
+                "/Library/LaunchDaemons/com.sangfor.aTrustTunnel.plist"]
+        evil = ["com.x; rm -rf /", "a$(whoami)b", "a`id`b", "a&b", "a>b",
+                "com x y", "-flag", "a'b"]
+        missed = [t for t in evil if safe_fn([t])]
+        broke = [t for t in good if not safe_fn([t])]
+        if missed:
+            fail("launchd 标签白名单", "这些可疑串**没被拦住**：%s"
+                 % "、".join(repr(t) for t in missed))
+        elif broke:
+            fail("launchd 标签白名单", "这些正常标签被误拦：%s"
+                 % "、".join(repr(t) for t in broke))
+        else:
+            ok("launchd 标签白名单",
+               "%d 个可疑串全被拦、%d 个正常标签放行" % (len(evil), len(good)))
+
+    # ---- 4. 提权探测 ----
+    try:
+        st = mod.priv_status()
+    except Exception as e:                  # noqa: BLE001
+        st = None
+        fail("提权能力探测", "%s: %s" % (type(e).__name__, e))
+    if isinstance(st, dict):
+        missing = [k for k in ("can_elevate", "code", "text") if k not in st]
+        if missing:
+            fail("提权能力探测", "缺字段：%s" % "、".join(missing))
+        elif st.get("can_elevate"):
+            ok("提权能力探测", "当前**有**管理员权限（改路由 / 启停隧道不会弹密码框）")
+        elif st.get("code") in ("NEED_SUDO", "NEED_ADMIN"):
+            info("提权能力探测",
+                 "当前为只读：%s（这是正常的，点「切到本机直连」时才会要授权；"
+                 "程序会在动手前先探测，不会做一半失败）" % (st.get("text") or st.get("code")))
+        else:
+            fail("提权能力探测", "can_elevate=False 却没给出哨兵码：%r" % st)
+
+    # ---- 5. save_config 是读-改-写（不能把配置里其它键冲掉）----
+    saved = (getattr(mod, "CONFIG_DIR", None), getattr(mod, "CONFIG_FILE", None))
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="tm_selftest_cfg_")
+        mod.CONFIG_DIR = tmpdir
+        mod.CONFIG_FILE = os.path.join(tmpdir, "config.json")
+        with open(mod.CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.write('{"domains": ["keep.example"], '
+                    '"fake_ip_pools": {"host": ["9\\\\.9\\\\."]}, "misc": 42}')
+        mod.save_config(["b.example", "B.example", "  c.example  "])
+        with open(mod.CONFIG_FILE, encoding="utf-8") as f:
+            after = json.load(f)
+        if after.get("domains") != ["b.example", "c.example"]:
+            fail("配置写入（读-改-写）", "域名没去重归一化：%r" % after.get("domains"))
+        elif after.get("fake_ip_pools") != {"host": ["9\\.9\\."]} or after.get("misc") != 42:
+            fail("配置写入（读-改-写）",
+                 "保存域名把其它键冲掉了（fake_ip_pools=%r misc=%r）—— "
+                 "用户表现是「改一次域名表，别处配置就没了」"
+                 % (after.get("fake_ip_pools"), after.get("misc")))
+        else:
+            ok("配置写入（读-改-写）", "域名已归一化，其余键原样保留")
+    except Exception as e:                  # noqa: BLE001
+        fail("配置写入（读-改-写）", "%s: %s" % (type(e).__name__, e))
+    finally:
+        if saved[0] is not None:
+            mod.CONFIG_DIR, mod.CONFIG_FILE = saved
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def render():
     counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "SKIP": 0, "INFO": 0, "SEC": 0}
     for lv, _n, _d in R:
@@ -964,7 +1147,8 @@ def main():
 
     for fn in (check_system, check_encoding, check_runtime, check_files,
                check_cmds, check_ports, check_httpserver, check_dns,
-               check_app_real, check_clients, check_outlets, check_win_env):
+               check_app_real, check_clients, check_outlets, check_win_env,
+               check_rules):
         try:
             fn()
         except BaseException as e:      # noqa: BLE001 —— 单项崩了不能拖垮整份报告

@@ -19,9 +19,12 @@ def _nat_route_print():
     路由表行是 5 列地址/数字。这两处在中英文 Windows 上完全一样。
     """
     def _load():
-        rc, out, _ = run(["route", "print", "-4"], timeout=25)
+        # retries=1：这些只读命令正常耗时 <100ms，而真机上有企业安全管理软件时
+        # 「偶发地被拦一次」是常态（实测 powershell.exe 被策略直接拒）。
+        # 重试一次几乎不花时间，却能救回一次瞬时失败；重试仍失败才算真不可用。
+        rc, out, _ = run(["route", "print", "-4"], timeout=25, retries=1)
         if rc != 0 or not out:
-            rc, out, _ = run(["route", "print"], timeout=25)
+            rc, out, _ = run(["route", "print"], timeout=25, retries=1)
         if rc != 0 or not out:
             return {"ifaces": {}, "routes": []}
         ifaces, routes = {}, []
@@ -52,7 +55,7 @@ def _nat_arp_map():
     标题行会随系统语言变（接口/Interface），但这行本身中英文一致。
     """
     def _load():
-        rc, out, _ = run(["arp", "-a"], timeout=20)
+        rc, out, _ = run(["arp", "-a"], timeout=20, retries=1)
         m = {}
         if rc != 0 or not out:
             return m
@@ -73,7 +76,7 @@ def _nat_netsh_ifaces():
     """
     def _load():
         rc, out, _ = run(["netsh", "interface", "ipv4", "show", "interfaces"],
-                         timeout=25)
+                         timeout=25, retries=1)
         res = {}
         if rc != 0 or not out:
             return res
@@ -106,7 +109,7 @@ def _nat_netsh_addrs():
     """
     def _load():
         rc, out, _ = run(["netsh", "interface", "ipv4", "show", "addresses"],
-                         timeout=25)
+                         timeout=25, retries=1)
         res = {}
         if rc != 0 or not out:
             return res

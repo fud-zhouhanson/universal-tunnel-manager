@@ -12,16 +12,6 @@
 本模块依赖其它切片：_base、consts、detect/iface、outlet/manager、outlet/scene、util、win/identify、win/outlets、win/switch
 """
 >>>SLICE_BODY<<<
-def _sh(cmd, timeout=20):
-    """跑一条只读命令，返回 stdout。"""
-    try:
-        p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
-        return p.stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-
 def active_ifaces():
     """本机当前存在的网络接口名集合（跨平台）。"""
     if IS_WIN:
@@ -185,25 +175,44 @@ def do_scene(target, pw=None):
         return {"ok": False, "target": target, "done": [], "manual": [],
                 "message": f"未知情景：{target}"}
 
+    # ---- 前置探测：没权限就**一步都不做** ----
+    # 为什么必须放在最前面：情景切换天生是**多步**的（先停对家、再清残留路由），
+    # 每一步都要 root。以前是做完第一步才发现没权限 —— 用户被留在
+    # 「aTrust 已经摘掉、残留路由还挂着」的半残状态，比什么都不做更糟。
+    can, _code, text = priv_capability(pw)
+    if not can:
+        return {"ok": False, "target": target, "read_only": True, "done": [],
+                "manual": [{"key": s["key"], "desc": s["desc"],
+                            "detail": s["detail"], "mode": s["mode"]}
+                           for s in scene_steps(target)
+                           if s["mode"] in ("manual", "verify")],
+                "message": f"{text} —— 未做任何改动；可先按下面的步骤手动操作"}
+
     done, manual, need_sudo = [], [], False
 
     if target == "game":
         if atrust_up():
-            cmds = " ; ".join(f"launchctl bootout {j}" for j in ATRUST_JOBS)
-            rc, _o, _e = run_root(cmds, pw)
-            if rc == 403:
+            # 走 stop_launchd_jobs 而不是自己拼命令：那里带**失败自动回滚**
+            # （卸了一半会把已卸的 bootstrap 回来），
+            # 情景切换停的正是同一个 WatchDog → Tunnel → Daemon 组合。
+            ok, msg = stop_launchd_jobs(ATRUST_JOBS, ATRUST_PLISTS, pw, "aTrust")
+            if msg == "NEED_SUDO":
                 need_sudo = True
                 done.append({"key": "stop_atrust", "ok": False,
                              "detail": "需要管理员密码才能停 aTrust"})
             else:
-                done.append({"key": "stop_atrust", "ok": True,
-                             "detail": "已 bootout 3 个守护作业"})
+                done.append({"key": "stop_atrust", "ok": ok, "detail": msg})
         else:
             done.append({"key": "stop_atrust", "ok": True,
                          "detail": "aTrust 本来就没在跑"})
     else:
-        cmds = " ; ".join(
-            f"launchctl bootstrap system {p} 2>/dev/null || true" for p in ATRUST_PLISTS)
+        targets = []
+        for p in ATRUST_PLISTS:
+            t = _safe_launchd_tokens(f"system {p}".split())
+            if t:
+                targets.append(" ".join(t))
+        cmds = " ; ".join(f"launchctl bootstrap {t} 2>/dev/null || true"
+                          for t in targets)
         rc, _o, _e = run_root(cmds, pw)
         if rc == 403:
             need_sudo = True

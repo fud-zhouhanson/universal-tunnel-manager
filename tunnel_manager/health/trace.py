@@ -72,7 +72,7 @@ def do_trace():
         for j, srv in enumerate(servers):
             rc_, d_ips = raws[i * len(servers) + j] or (None, [])
             direct.append({"server": srv, "rcode": rc_, "ips": d_ips})
-        fake = sorted({p for p in ips if FAKE_IP_RE.match(p)})
+        fake = sorted({p for p in ips if is_fake_pool_host(p)})
         dset = set()
         for d in direct:
             dset |= set(d["ips"])

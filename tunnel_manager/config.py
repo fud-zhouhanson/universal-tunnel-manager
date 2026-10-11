@@ -8,7 +8,7 @@
   · 开发期入口 `python -m tunnel_manager.main` → 把所有切片拼进一个命名空间再执行；
   · 构建期 `bundle.py` → 同样顺序拼接成单文件 `dist/tunnel-manager.py`（纯源码，不含 exec）。
 所以本文件里可以直接引用其它切片定义的函数与常量，无需 import。跨切片调用是既有事实。
-本模块对外提供：AUTO_EXPIRE、AUTO_INTERVAL、AUTO_MAX、AUTO_WINDOW、DEFAULT_DOMAINS、DNS_TTL 等 9 个
+本模块对外提供：AUTO_EXPIRE、AUTO_INTERVAL、AUTO_MAX、AUTO_WINDOW、DEFAULT_DOMAINS、DNS_TTL 等 13 个
 本模块依赖其它切片：_base、consts
 """
 >>>SLICE_BODY<<<
@@ -29,16 +29,24 @@ DEFAULT_DOMAINS = [
 ]
 
 
-def load_config():
+def load_config_raw():
+    """读整份 config.json；不存在 / 写坏了 / 不是对象 → 一律给空 dict。
+
+    以前只有 load_config()（只取 domains 一项），而 save_config() 是**整份覆盖写**
+    —— 任何「顺带存个别的键」都会被下一次保存域名冲掉。
+    现在多了假 IP 池规则这类可配置项，必须先补上「读整份」的能力。
+    """
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
-        domains = cfg.get("domains") or []
-        if domains:
-            return domains
+        return cfg if isinstance(cfg, dict) else {}
     except (OSError, json.JSONDecodeError):
-        pass
-    return list(DEFAULT_DOMAINS)
+        return {}
+
+
+def load_config():
+    domains = load_config_raw().get("domains") or []
+    return domains if domains else list(DEFAULT_DOMAINS)
 
 
 def save_config(domains):
@@ -48,9 +56,86 @@ def save_config(domains):
         d = (d or "").strip().lower()
         if d and d not in cleaned:
             cleaned.append(d)
+    # ⚠️ 必须**读-改-写**。以前只写 {"domains": […] }，会把文件里其它键一并抹掉
+    # —— 表现是「保存一次域名表，假 IP 池配置就没了」。
+    cfg = load_config_raw()
+    cfg["domains"] = cleaned
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump({"domains": cleaned}, f, ensure_ascii=False, indent=2)
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
     return cleaned
+
+
+# ======================================================================
+# 六.2 假 IP 池规则（可配置）
+# ======================================================================
+# 隧道 / 加速器客户端惯用的把戏：把域名解析到一组「假 IP」，再在假 IP 上做分流。
+# 表现就是「显示在加速中、实际没效果」。判定规则**外置成数据**，
+# 想给自己的环境再加一段，不必改代码 —— 在 ~/.tunnel-manager/config.json 里写：
+#
+#   {"fake_ip_pools": {"host": ["198\\.18\\.", "10\\.10\\."],
+#                      "net":  ["172\\.31\\."]}}
+#
+# 只做**整体替换**，不做合并 —— 覆盖语义越简单越不容易误判。
+#
+# ⚠️ 两组规则语义不同，**不要合并成一组**：
+#   host —— 与「域名解析出来的那个地址」做前缀匹配
+#   net  —— 与「路由表里的目的网段地址」做前缀匹配
+# 为什么不能合并：host 侧必须连 127. / 169.254. 一起排除（正常域名不该解析到
+# 本机地址与链路本地地址），但 net 侧若也这么干，就会去删 **169.254.0.0/16
+# 这类合法的链路本地路由** —— 那是会把用户网络搞断的事故。
+# 所以 net 侧**刻意收窄**，只认「一看就是隧道假 IP 池」的那三段。
+
+FAKE_POOL_HOST_RULES = (
+    r"0\.0\.0\.0", r"127\.", r"169\.254\.",
+    r"198\.1[89]\.", r"100\.6[4-9]\.", r"100\.[7-9]\d\.", r"100\.1[0-2]\d\.",
+    r"240\.0\.0\.", r"255\.255\.255\.255",
+)
+FAKE_POOL_NET_RULES = (
+    r"198\.1[89]\.", r"100\.6[4-9]\.", r"240\.0\.0\.",
+)
+
+_fake_rule_cache = {}      # kind -> (expire_ts, rules, 已编译正则)
+_FAKE_RULE_TTL = 30        # 秒。别为每个域名 / 每条路由都去读一次配置文件
+
+
+def _fake_compiled(kind):
+    """(规则元组, 编译好的正则)，带缓存。用户正则写坏了就退回内置默认。"""
+    now = time.time()
+    hit = _fake_rule_cache.get(kind)
+    if hit and hit[0] > now:
+        return hit[1], hit[2]
+    builtin = FAKE_POOL_HOST_RULES if kind == "host" else FAKE_POOL_NET_RULES
+    got = (load_config_raw().get("fake_ip_pools") or {}).get(kind)
+    rules = tuple(str(r) for r in got
+                  if isinstance(r, str) and r.strip()) if isinstance(got, list) else ()
+    if not rules:
+        rules = tuple(builtin)
+    try:
+        rx = re.compile("|".join(rules))
+    except re.error:
+        rules = tuple(builtin)      # 绝不让一条写坏的配置把整个界面搞崩
+        rx = re.compile("|".join(rules))
+    _fake_rule_cache[kind] = (now + _FAKE_RULE_TTL, rules, rx)
+    return rules, rx
+
+
+def is_fake_pool_host(ip):
+    """域名「解析」出来的地址是不是落进了假 IP 池。
+
+    ⚠️ 这里原先写的是 `^(…|127\\.|198\\.1[89]\\.|…)$` —— 结尾那个 `$` 紧跟在
+    点号后面，等于要求整串就是 "127." / "198.18." 这几个字符串本身，
+    **任何真实 IP 都匹配不上**，于是整条「DNS 被改写进假 IP 池」的检测一直是哑的
+    （体检报告里永远查不出假 IP，不是没问题，是没在查）。
+    现在改成纯前缀匹配，并把规则外置。
+    """
+    s = (ip or "").strip()
+    return bool(s) and bool(_fake_compiled("host")[1].match(s))
+
+
+def is_fake_pool_net(dest):
+    """路由目的地址是不是「隧道假 IP 池」网段。"""
+    s = (dest or "").strip()
+    return bool(s) and bool(_fake_compiled("net")[1].match(s))
 
 
 _dns_cache = {}          # domain -> (expire_ts, [ips])

@@ -8,8 +8,8 @@
   · 开发期入口 `python -m tunnel_manager.main` → 把所有切片拼进一个命名空间再执行；
   · 构建期 `bundle.py` → 同样顺序拼接成单文件 `dist/tunnel-manager.py`（纯源码，不含 exec）。
 所以本文件里可以直接引用其它切片定义的函数与常量，无需 import。跨切片调用是既有事实。
-本模块对外提供：FAKE_IP_RE、HEALTH_FILE、RESCUE_LOG、TRUTH_DOMAINS、TRUTH_TARGETS、first_hop 等 10 个
-本模块依赖其它切片：_base、detect/iface、outlet/scene_ops、util
+本模块对外提供：HEALTH_FILE、RESCUE_LOG、TRUTH_DOMAINS、TRUTH_TARGETS、first_hop 等 10 个
+本模块依赖其它切片：_base、config、detect/iface、outlet/scene_ops、util
 """
 >>>SLICE_BODY<<<
 # ======================================================================
@@ -34,10 +34,9 @@ TRUTH_TARGETS = [
 
 TRUTH_DOMAINS = ["www.baidu.com", "www.qq.com", "github.com"]
 
-# 假 IP 池 / 保留段：正常的公网域名不该解析到这里
-FAKE_IP_RE = re.compile(
-    r"^(0\.0\.0\.0|127\.|169\.254\.|198\.1[89]\.|100\.6[4-9]\.|100\.[7-9]\d\.|"
-    r"100\.1[0-2]\d\.|240\.0\.0\.|255\.255\.255\.255)$")
+# 假 IP 池的判定规则**不在本文件** —— 它已经外置到 config.py（可配置），
+# 用 is_fake_pool_host() / is_fake_pool_net() 取用。这里只留一句提醒：
+# 两组规则的语义不同（host 前缀 vs net 前缀），不要合并，理由见 config.py 的注释。
 
 HEALTH_FILE = os.path.join(CONFIG_DIR, "health.json")
 RESCUE_LOG = os.path.join(CONFIG_DIR, "rescue.log")

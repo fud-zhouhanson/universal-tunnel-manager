@@ -757,6 +757,9 @@
 <!-- ── 环境提示：Windows 上系统的读取通道可能被安全策略挡掉 ── -->
 <div class="callout warn" id="winEnvWarn" style="display:none"></div>
 
+<!-- ── 权限提示：现在是只读（没提权能力）时提前说清楚 ── -->
+<div class="callout warn" id="privWarn" style="display:none"></div>
+
 <!-- ── 概览：一眼看清"现在什么状态 + 能做什么" ─────────── -->
 <section class="card" id="s-overview" aria-labelledby="h-overview">
   <div class="card-head">
@@ -1165,6 +1168,7 @@ function render(s) {
   }
 
   renderWinEnv(s);
+  renderPriv(s);
 
   // 当前情景
   const sc = s.scene || {};
@@ -1631,6 +1635,31 @@ function renderWinEnv(s) {
       : '。<br>本机可能装了企业安全管理软件。程序仍能启动，但依赖系统查询的功能会不全。') +
     (w.powershell_error
       ? `<br><span class="meta">原始错误：${esc(w.powershell_error)}</span>` : '');
+}
+
+// ---- 提权能力：现在是只读还是能改系统 ----
+// 后端在扫描时先探测一次「现在能不能提权」，这里据实显示。
+// 目的是让用户**点之前**就知道会要密码，而不是点下去才被弹一个框 ——
+// 更重要的另一半在后端：没权限时那些多步操作会整段不做，
+// 不会出现「停了一半的隧道客户端」这种半残状态。
+function renderPriv(s) {
+  const box = $('privWarn');
+  if (!box) return;
+  const p = s.priv;
+  // 后端没这个字段（旧版包），或本来就有权限 → 不显示
+  if (!p || typeof p.can_elevate !== 'boolean' || p.can_elevate) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = '';
+  box.className = 'callout warn';
+  const win = p.code === 'NEED_ADMIN';
+  box.innerHTML = '<b>当前为只读模式</b> —— ' + esc(p.text || '需要管理员权限') + '。<br>'
+    + '扫描、诊断、体检这些只读功能都能正常用。'
+    + '「切到本机直连」「交回隧道」「启停隧道客户端」「一键应急恢复」需要管理员权限：'
+    + (win ? '点击时会弹出系统授权确认框，点「是」即可。'
+           : '点击时会要求输入开机密码，输一次之后一段时间内不会再问。');
 }
 
 // ---- 自动追踪 ----

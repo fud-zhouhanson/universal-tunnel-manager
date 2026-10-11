@@ -9,7 +9,7 @@
   · 构建期 `bundle.py` → 同样顺序拼接成单文件 `dist/tunnel-manager.py`（纯源码，不含 exec）。
 所以本文件里可以直接引用其它切片定义的函数与常量，无需 import。跨切片调用是既有事实。
 本模块对外提供：fake_pool_routes、health_snapshot、load_health、net_service_for_iface、save_health
-本模块依赖其它切片：_base、detect/route、health/dns、health/egress、health/probe、outlet/scene_ops、win/identify
+本模块依赖其它切片：_base、config、detect/route、health/dns、health/egress、health/probe、outlet/scene_ops、win/identify
 """
 >>>SLICE_BODY<<<
 def net_service_for_iface(iface):
@@ -63,12 +63,18 @@ def load_health():
 
 
 def fake_pool_routes():
-    """路由表里指向「假 IP 池」网段的条目（隧道接管的典型痕迹）。"""
+    """路由表里指向「假 IP 池」网段的条目（隧道接管的典型痕迹）。
+
+    规则来自 config.py 的 is_fake_pool_net()（可在 config.json 里覆盖），
+    默认只认 198.18/19、100.64–69、240.0.0 —— **刻意收窄**：
+    这些都是「一看就是隧道假 IP 池」的段。宁可漏判，
+    也不要误删 169.254/16 之类**合法**的链路本地路由。
+    """
     found = []
     for dest, _alias in _routes_snapshot():
         if "/" not in dest:
             continue
-        if re.match(r"^(198\.1[89]\.|100\.6[4-9]\.|240\.0\.0\.)", dest.split("/")[0]):
+        if is_fake_pool_net(dest.split("/")[0]):
             found.append(dest)
     return sorted(set(found))
 

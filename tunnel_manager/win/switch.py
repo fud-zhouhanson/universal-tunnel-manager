@@ -12,6 +12,140 @@
 本模块依赖其它切片：_base、detect/scan、outlet/apply、outlet/manager、outlet/scene_ops、util、win/apps、win/outlets
 """
 >>>SLICE_BODY<<<
+# ---- launchd 作业标签 / plist 路径：拼进 root shell 之前先过白名单 ----
+#
+# ⚠️ 这不是多此一举：标签有一部分是**扫磁盘目录得到的 plist 文件名**
+# （见 outlet/manager.py 的 _find_launchd），plist 路径同理。
+# 它们会被拼进 `launchctl bootout <标签>` 交给 root shell 执行 ——
+# 一个带空格或分号的 plist 文件名就能在提权上下文里注入命令。
+# 校验失败一律**整段作废**，宁可报「无法自动操作」也不拼一条可疑的命令。
+_SAFE_LAUNCHD_RE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
+
+
+def _safe_launchd_tokens(tokens):
+    """逐段白名单校验；任何一段不合格就返回 []（调用方当「不可用」处理）。
+
+    白名单里**不含空格**：这些 token 是直接拼进 shell 的，不做引号包裹；
+    允许空格等于允许「一个名字变成多个参数」，拼出来的命令就不是我们想跑的那条。
+    名字里真有空格的 plist（macOS 允许）→ 判定为「无法自动操作」，如实告诉用户，
+    也好过去跑一条语义已经变了的命令。
+    """
+    out = []
+    for t in tokens:
+        s = str(t or "").strip()
+        if not s or s.startswith("-") or not _SAFE_LAUNCHD_RE.match(s):
+            return []
+        out.append(s)
+    return out
+
+
+_JOB_MISSING_HINTS = (
+    "could not find service", "no such process", "service not found",
+    "could not find specified service", "not loaded",
+)
+_JOB_ALREADY_HINTS = (
+    "already loaded", "already bootstrapped", "operation already in progress",
+)
+
+
+def _job_missing(err):
+    """bootout 失败是不是因为「这个作业本来就没加载」。
+
+    这类「失败」等价于已经达成目标，**不能算错** —— 否则当 aTrust 只加载了
+    WatchDog 时，去停不存在的 Tunnel 会被判失败，进而触发一次毫无必要的回滚。
+    """
+    e = (err or "").lower()
+    return any(h in e for h in _JOB_MISSING_HINTS)
+
+
+def _job_already(err):
+    """bootstrap 失败是不是因为「这个作业已经在跑」—— 那正是回滚想要的结果。"""
+    e = (err or "").lower()
+    return any(h in e for h in _JOB_ALREADY_HINTS)
+
+
+def _plist_for_job(job, plists):
+    """由守护作业标签找回它的 plist 路径（回滚时要用它 bootstrap 回去）。"""
+    want = str(job).rsplit("/", 1)[-1]
+    for p in plists or []:
+        if os.path.basename(str(p))[:-len(".plist")] == want:
+            return str(p)
+    return ""
+
+
+def _restore_jobs(jobs, plists, pw):
+    """把刚 bootout 掉的守护作业 bootstrap 回原状 —— 失败时自动回滚用。
+
+    返回 (ok, 说明)。这里**必须逐条看返回码**：回滚要是也吞掉失败，
+    「已自动恢复」就成了空话，用户反而更不敢信这个提示。
+    """
+    targets = []
+    for j in jobs:
+        p = _plist_for_job(j, plists)
+        if p:
+            t = _safe_launchd_tokens(_bootstrap_target(p).split())
+            if t:
+                targets.append(" ".join(t))
+    if not targets:
+        return False, "找不到对应的 plist，无法自动回滚"
+    failed = []
+    for t in targets:
+        rc, _o, e = run_root(f"launchctl bootstrap {t}", pw)
+        if rc != 0 and not _job_already(e):
+            failed.append((t, (e or "").strip()[:100]))
+    if failed:
+        return False, "；".join(f"{t} → {e}" for t, e in failed)[:200]
+    return True, f"已恢复 {len(targets)} 个守护作业"
+
+
+def stop_launchd_jobs(jobs, plists, pw=None, name=""):
+    """bootout 一组守护作业，**带失败自动回滚**。返回 (ok, 说明)。
+
+    抽出来共用：出口切换（outlet_stop）与情景切换（do_scene）都要这套逻辑。
+    以前两边各自把命令用 `; ` 拼成一条、有的还带 `|| true` —— 于是
+    「WatchDog 卸了、Tunnel 没卸」这种**停一半**会被报成完全成功，
+    用户以为已经退出、其实隧道还在。这是本函数存在的唯一理由。
+    """
+    label = name or "守护作业"
+    safe = []
+    for j in jobs or []:
+        t = _safe_launchd_tokens([j])
+        if t:
+            safe.append(t[0])
+    if not safe:
+        return False, "没有可安全操作的守护作业（标签未通过校验）"
+
+    can, code, _txt = priv_capability(pw)
+    if not can:
+        return False, code
+
+    unloaded, failed = [], []
+    for j in safe:
+        rc, _o, e = run_root(f"launchctl bootout {j}", pw)
+        if rc == 0:
+            unloaded.append(j)
+        elif rc == 403:
+            # 权限中途失效（凭据过期等）→ 把已经卸掉的捞回来，别把系统留在半残状态
+            if unloaded:
+                _restore_jobs(unloaded, plists, pw)
+            return False, "NEED_SUDO"
+        elif _job_missing(e):
+            continue          # 本来就没加载 = 已经是目标状态，不算失败
+        else:
+            failed.append((j, (e or "").strip()[:120]))
+
+    if failed:
+        # 「停一半」是最危险的状态 → 整单回滚，把系统退回原样，让用户重试或手动处理
+        back_ok, bmsg = _restore_jobs(unloaded, plists, pw)
+        hint = ("已自动把刚卸掉的守护作业恢复回原状，系统状态没有变。" if back_ok
+                else f"⚠ 自动恢复也没成功（{bmsg}）—— 请用它自己的界面退出，或重启电脑。")
+        return False, (f"{'、'.join(f[0] for f in failed)} 卸不掉"
+                       f"（{failed[0][1]}）。{hint}")
+    if not unloaded:
+        return True, f"{label} 本来就没在跑"
+    return True, f"已停止 {label}（bootout {len(unloaded)} 个作业）"
+
+
 def outlet_stop(key, pw=None, res=None):
     """停掉一个出口。返回 (ok, message)；message 为 NEED_SUDO 表示缺密码。"""
     o = _outlet_by_key(key, res)
@@ -45,20 +179,21 @@ def outlet_stop(key, pw=None, res=None):
                            % (o["name"], text[:200] or "未知原因"))
         return True, "已停止 %s（%d 个服务）" % (o["name"], len(names))
 
-    jobs = ad.get("stop_jobs") or []
+    jobs = []
+    for j in (ad.get("stop_jobs") or []):
+        t = _safe_launchd_tokens([j])
+        if t:
+            jobs.append(t[0])
     if not jobs:
         return False, (f"{o['name']} 没有可自动关闭的守护作业"
                        f"（{o.get('hint') or '需要手动操作'}）")
-    cmd = " ; ".join(f"launchctl bootout {j} 2>/dev/null || true" for j in jobs)
-    rc, _o, _e = run_root(cmd, pw)
-    if rc == 403:
+
+    ok, msg = stop_launchd_jobs(jobs, ad.get("start_plists") or [], pw, o["name"])
+    if msg == "NEED_SUDO":
         return False, "NEED_SUDO"
-    # ⚠️ 这里过去只看「是不是 403」就报成功 —— 其它非零返回码（命令跑不动、
-    #    作业名写错）会被说成「已停止」，用户以为关掉了其实没关。现在如实判定。
-    if rc != 0:
-        return False, (f"停止「{o['name']}」未成功（rc={rc}）："
-                       f"{(_e or _o or '')[:160]}")
-    return True, f"已停止 {o['name']}（bootout {len(jobs)} 个作业）"
+    if not ok:
+        return False, f"停止「{o['name']}」未成功：{msg}"
+    return True, msg
 
 
 def outlet_start(key, pw=None, res=None):
@@ -107,10 +242,14 @@ def outlet_start(key, pw=None, res=None):
         return True, "；".join(msgs)
 
     msgs = []
-    plists = ad.get("start_plists") or []
+    plists = []
+    for p in (ad.get("start_plists") or []):
+        t = _safe_launchd_tokens(_bootstrap_target(p).split())
+        if t:
+            plists.append(" ".join(t))
     if plists:
-        cmd = " ; ".join(f"launchctl bootstrap {_bootstrap_target(p)} 2>/dev/null || true"
-                         for p in plists)
+        cmd = " ; ".join(f"launchctl bootstrap {t} 2>/dev/null || true"
+                         for t in plists)
         rc, _o, _e = run_root(cmd, pw)
         if rc == 403:
             return False, "NEED_SUDO"

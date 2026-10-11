@@ -298,6 +298,9 @@ def assemble(software, phys_iface, phys_gw, def_iface, interfaces,
         "auto_status": get_auto_status(),
         # Windows 上哪些系统读取通道可用（PowerShell 被策略禁了没、原生回退顶没顶上）
         "win_env": win_env_status(),
+        # 现在是只读还是有提权能力 —— 界面据此提前挂出「只读提示」，
+        # 而不是等用户点了「应用到系统」才弹密码框
+        "priv": priv_status(),
         # 追踪的域名是「临时」的：多久没再看就会被移除，多久扫一次
         "auto_window": AUTO_WINDOW,
         "auto_expire": AUTO_EXPIRE,
