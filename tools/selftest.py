@@ -55,6 +55,24 @@ APP = find_app()
 IS_WIN = platform.system() == "Windows"
 NO_WINDOW = 0x08000000 if IS_WIN else 0     # CREATE_NO_WINDOW，避免弹黑框
 
+_APP_MOD = {"m": None}
+
+
+def load_app():
+    """加载程序主体（只加载一次，多个检查项共用同一个模块实例）。"""
+    if _APP_MOD["m"] is not None:
+        return _APP_MOD["m"]
+    spec = importlib.util.spec_from_file_location("tm_selftest_app", APP)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["tm_selftest_app"] = mod
+    spec.loader.exec_module(mod)
+    _APP_MOD["m"] = mod
+    return mod
+
+
+# 第十二段采集到的原始输出 —— 附在报告末尾，用于校准解析器
+EXTRA_DUMP = []
+
 # 记录原始的 stdout 编码 —— 这是我们要诊断的东西，改之前先记下来
 ORIG_STDOUT_ENC = getattr(sys.stdout, "encoding", None)
 
@@ -345,7 +363,11 @@ def check_cmds():
             ok("powershell Get-NetRoute", "可用（默认路由的读取走它）")
         else:
             warn("powershell Get-NetRoute",
-                 "返回码 %s；%s" % (rc, (out or "").strip()[:160]))
+                 "返回码 %s；%s —— "
+                 "**这不影响使用**：程序会自动改用系统自带的原生命令"
+                 "（route / arp / netsh / sc / tasklist），"
+                 "是否已成功回退见第十二段「系统查询通道」。"
+                 % (rc, (out or "").strip()[:160]))
         return
 
     if sysname == "Darwin":
@@ -554,6 +576,127 @@ def check_clients():
 
 
 # ----------------------------------------------------------------------
+# 十一、出口切换的探测层（Windows）
+# ----------------------------------------------------------------------
+def check_outlets():
+    """真跑一遍「出口切换」的探测层 —— **全程只读**。
+
+    Windows 上「切隧道」要靠三件事，这一段逐项验证它们在这台机器上到底行不行：
+      ① 注册表 → 认出装了哪些客户端
+      ② SCM    → 认出哪些服务可以停 / 启
+      ③ 系统 VPN → 认出可以 rasdial 的连接
+
+    ⚠️ 这一段**不会**停任何服务、**不会**改任何路由、**不会**主动弹 UAC。
+    它只回答一个问题：真点「切到这里」时，有多少步骤能自动完成。
+    """
+    sec("十一、出口切换的探测层（Windows）")
+    if not IS_WIN:
+        skip("Windows 出口适配",
+             "当前不是 Windows，跳过（macOS 走 launchd 那套，见第九段）")
+        return
+    if not os.path.isfile(APP):
+        skip("Windows 出口适配", "app/tunnel-manager.py 不存在")
+        return
+
+    try:
+        spec = importlib.util.spec_from_file_location("tm_selftest_outlets", APP)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["tm_selftest_outlets"] = mod
+        spec.loader.exec_module(mod)
+    except Exception as e:                  # noqa: BLE001
+        fail("加载模块（出口适配）", "%s: %s" % (type(e).__name__, e))
+        return
+
+    # 版本闸门：旧版程序里根本没有这几个函数，直接说清楚，
+    # 免得后面抛一堆 AttributeError 让人以为是自己机器的问题。
+    if not hasattr(mod, "_win_registry_apps"):
+        fail("程序版本",
+             "这份 app/tunnel-manager.py 里**没有** Windows 出口适配的代码（是旧版）。"
+             "请用同一批下载里的新包重新解压一份再跑。")
+        return
+
+    # ① 注册表 → 已安装程序
+    apps, err = call_timeout(mod._win_registry_apps, 120)
+    if err is not None:
+        fail("读注册表（已安装程序）", str(err))
+    elif apps:
+        ok("读注册表（已安装程序）", "读到 %d 条" % len(apps))
+        sample = [a["name"] for a in apps if a.get("name")][:5]
+        info("  抽样", "、".join(sample))
+    else:
+        warn("读注册表（已安装程序）",
+             "一条都没读到 —— 客户端会被判成「没安装」，出口列表里就不会出现")
+
+    # ② SCM → 服务
+    svcs, err = call_timeout(mod._win_service_list, 120)
+    if err is not None:
+        fail("枚举 Windows 服务", str(err))
+        svcs = None
+    elif not svcs:
+        warn("枚举 Windows 服务", "一个都没读到 —— 「停止 / 启动」会退化成手动")
+    else:
+        ok("枚举 Windows 服务", "%d 个" % len(svcs))
+
+    if svcs:
+        kws = set()
+        for entry in mod.TUNNEL_KNOWLEDGE:
+            if entry.get("cat") in mod.OUTLET_CATS:
+                kws |= set(mod._kb_keywords(entry))
+        hit, err = call_timeout(mod._find_services_win, 60, sorted(kws))
+        if err is not None:
+            warn("按关键词匹配可停服务", str(err))
+        elif hit:
+            ok("按关键词匹配可停服务",
+               "%d 个：%s" % (len(hit), "、".join(
+                   "%s(%s)" % (s["name"], "运行中" if s["running"] else "已停")
+                   for s in hit[:6])))
+        else:
+            info("按关键词匹配可停服务",
+                 "0 个 —— 这台机器上没有以「服务」形式存在的隧道客户端。"
+                 "加速器类多数只有界面开关，属正常，不影响其它功能")
+
+    # ③ 系统自带 VPN
+    vpns, err = call_timeout(mod._win_vpn_list, 90)
+    if err is not None:
+        warn("读系统 VPN（Get-VpnConnection）", str(err))
+    elif vpns:
+        ok("读系统 VPN（Get-VpnConnection）",
+           "%d 个：%s" % (len(vpns), "、".join(v["name"] for v in vpns[:5])))
+    else:
+        info("读系统 VPN（Get-VpnConnection）", "没有配置系统自带的 VPN（正常）")
+
+    # ④ 残留路由：**只列不删**
+    try:
+        valid = mod.active_ifaces()
+        stale = sorted({d for d, a in mod._routes_snapshot()
+                        if d != "default" and a and a not in valid},
+                       key=lambda d: -len(d))
+        if stale:
+            warn("残留路由预演（只列不删）",
+                 "%d 条指向已消失的接口：%s" % (len(stale), "、".join(stale[:6])))
+        else:
+            ok("残留路由预演（只列不删）", "没有指向已消失接口的路由")
+    except Exception as e:                  # noqa: BLE001
+        warn("残留路由预演（只列不删）", "%s: %s" % (type(e).__name__, e))
+
+    # ⑤ 提权方式（**不主动触发**，只是说明）
+    info("提权方式", "UAC —— 点「停止 / 启动 / 切换」时会弹确认框，点「是」即可。"
+                     "本自检不会主动触发它")
+
+    # ⑥ 把将要执行的 PowerShell 片段打印出来，方便人工核对 / 反馈
+    try:
+        lines = mod._ps_try_lines("Stop-Service -Force", ["__示例服务__"])
+        if any("__TM_OK__" in x for x in lines):
+            ok("生成提权脚本片段", "已生成（含成败标记）")
+            for ln in lines:
+                info("    |", ln[:130])
+        else:
+            fail("生成提权脚本片段", "片段里没有成败标记 —— 判定逻辑会失效")
+    except Exception as e:                  # noqa: BLE001
+        fail("生成提权脚本片段", "%s: %s" % (type(e).__name__, e))
+
+
+# ----------------------------------------------------------------------
 # 汇总输出
 # ----------------------------------------------------------------------
 def render():
@@ -611,6 +754,16 @@ def render():
         verdict = "结论：环境完全正常，可以直接双击 START-双击启动.bat 使用。"
     out.append("  " + verdict)
     out.append("")
+    if EXTRA_DUMP:
+        out.append("-" * 70)
+        out.append("【附：系统命令原始输出】")
+        out.append("  下面这些是程序**读网卡/路由/服务时真正拿到的原始文本**。")
+        out.append("  三行以上看不懂的可以整段忽略 —— 它的用处是：如果界面上哪一项")
+        out.append("  显示不出来，凭这段就能精确定位是哪一步解析对不上。")
+        out.append("")
+        out.extend(EXTRA_DUMP)
+        out.append("=" * 70)
+        out.append("")
     out.append("  提示：本报告不含任何隐私信息（只有系统版本、网卡名、路由状态）。")
     out.append("=" * 70)
 
@@ -645,6 +798,159 @@ def render():
         print("  请直接把上面的内容复制粘贴发回来。")
 
 
+RAW_DUMPS = [
+    ("powershell 探测", ["powershell.exe", "-NoProfile", "-NonInteractive",
+                         "-Command", "'__TM_PS_OK__'"]),
+    ("route print -4", ["route", "print", "-4"]),
+    ("arp -a", ["arp", "-a"]),
+    ("netsh interface ipv4 show interfaces",
+     ["netsh", "interface", "ipv4", "show", "interfaces"]),
+    ("netsh interface ipv4 show addresses",
+     ["netsh", "interface", "ipv4", "show", "addresses"]),
+    ("sc query type= service state= all",
+     ["sc.exe", "query", "type=", "service", "state=", "all"]),
+    ("netstat -e", ["netstat", "-e"]),
+]
+
+
+def check_win_env():
+    """十二、Windows 上「系统查询通道」到底通不通。
+
+    背景（2026-10-11 真机报告）：有一台 Windows 11 上 powershell.exe 被管理员
+    策略拦死（[WinError 786]），程序会「不崩溃但全瞎」——网卡 0 个、隧道 0 个。
+    所以程序里加了一层**只吃 System32 原生命令**的回退解析，这一段验证它。
+
+    ① 明确回答 PowerShell 能不能用；
+    ② 不能用时，逐项验证原生回退有没有顶上；
+    ③ 把原生命令的**原始输出**附到报告末尾 —— 解析器就是按这些排版写的，
+       万一哪一项没解析出来，凭这段就能精确定位。
+
+    全程只读：不启动服务、不改路由、不弹 UAC。
+    """
+    global EXTRA_DUMP
+    sec("十二、系统查询通道（Windows 原生回退）")
+    if not IS_WIN:
+        skip("系统查询通道", "当前不是 Windows，跳过（macOS 用不到这一层）")
+        return
+    if not os.path.isfile(APP):
+        skip("系统查询通道", "app/tunnel-manager.py 不存在")
+        return
+
+    try:
+        mod = load_app()
+    except Exception as e:                  # noqa: BLE001
+        fail("加载模块（原生回退）", "%s: %s" % (type(e).__name__, e))
+        return
+    if not hasattr(mod, "ps_available") or not hasattr(mod, "_nat_interfaces"):
+        fail("程序版本",
+             "这份 app/tunnel-manager.py 里**没有**原生回退层的代码（是旧版）。"
+             "请用同一批下载里的新包重新解压一份再跑。")
+        return
+
+    # ① PowerShell 能不能用
+    ps_ok = None
+    try:
+        ps_ok, ps_err = mod.ps_available(force=True)
+    except Exception as e:                  # noqa: BLE001
+        fail("PowerShell 探测", "%s: %s" % (type(e).__name__, e))
+        ps_err = ""
+    if ps_ok:
+        ok("PowerShell 可用", "系统查询走 PowerShell（信息最全的那条路）")
+    elif ps_ok is False:
+        warn("PowerShell 不可用",
+             "被系统策略挡住了 —— 这不是程序的问题，装了企业安全管理软件"
+             "（如深信服 / 奇安信 / 360 企业版）的电脑常见这种情况。"
+             "程序会自动改用系统自带的原生命令（route / arp / netsh / sc / tasklist）。")
+        info("  原始错误", (ps_err or "(空)")[:300])
+
+    # ② 原生回退逐项体检（只在 PowerShell 不可用时才有意义）
+    if ps_ok is False:
+        probe = [
+            ("网卡列表", mod._nat_interfaces, ()),
+            ("默认路由", mod._nat_snapshot, ()),
+            ("路由快照", mod._nat_routes_snapshot, ()),
+            ("IP→接口（最长前缀匹配）", mod._nat_iface_of_batch,
+             (["114.114.114.114", "8.8.8.8"],)),
+            ("服务枚举（sc query）", mod._nat_service_list, ()),
+            ("已安装程序（winreg）", mod._nat_registry_apps, ()),
+            ("系统 VPN（rasphone.pbk）", mod._nat_vpn_list, ()),
+            ("进程列表（tasklist）", mod._nat_processes, ()),
+        ]
+        ifaces = None
+        for label, fn, args in probe:
+            r, err = call_timeout(fn, 120, *args)
+            if err is not None:
+                warn("原生：" + label, str(err)[:180])
+                continue
+            empty = (not r)
+            if empty:
+                warn("原生：" + label,
+                     "拿到空结果 —— 界面上这一项会是空的（原始输出见报告末尾）")
+            else:
+                n = len(r) if hasattr(r, "__len__") else None
+                if isinstance(r, dict) and "routes" in r:
+                    n = len(r.get("routes") or [])       # 默认路由快照：数里面的条数
+                ok("原生：" + label, "%d 条" % n if n is not None else "有结果")
+            if label == "网卡列表" and isinstance(r, list):
+                ifaces = r
+                for i in r[:8]:
+                    info("    " + (i.get("name") or "?")[:24],
+                         "type=%s %s ip=%s  %s"
+                         % (i.get("type"), i.get("status"),
+                            i.get("ipv4") or "-", (i.get("desc") or "")[:38]))
+
+        # ③ 决定性的一步：真实扫描能不能认出物理网卡与出口
+        try:
+            res = mod.do_scan()
+        except Exception as e:              # noqa: BLE001
+            fail("真实跑一次扫描", "%s: %s" % (type(e).__name__, e))
+            res = None
+        if isinstance(res, dict) and not res.get("error"):
+            phys = res.get("phys_iface") or ""
+            if phys:
+                ok("扫描认出物理网卡", "%s（网关 %s）"
+                   % (phys, res.get("phys_gw") or "?"))
+            else:
+                fail("扫描认出物理网卡",
+                     "phys_iface 是空的 —— 界面上「本机直连 / 隧道接管」会判不准")
+            outs = [o["name"] for o in (res.get("outlets") or [])]
+            if len(outs) > 1:
+                ok("出口探测", "、".join(outs))
+            else:
+                info("出口探测",
+                     "只列出「物理直连」—— 本机没装 / 没跑隧道客户端时属正常")
+            n_if = len(res.get("interfaces") or [])
+            if n_if:
+                ok("接口清单", "%d 个" % n_if)
+            else:
+                fail("接口清单", "一个接口都没列出来（原始输出见报告末尾）")
+
+    # ④ 采集原始输出
+    dump = []
+    for label, argv in RAW_DUMPS:
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True,
+                               timeout=90, errors="replace",
+                               creationflags=NO_WINDOW)
+            body = (p.stdout or "").strip()
+            tail = (p.stderr or "").strip()
+            rc = p.returncode
+        except Exception as e:              # noqa: BLE001
+            body, tail, rc = "", "%s: %s" % (type(e).__name__, e), "ERR"
+        dump.append("===== %s   (rc=%s) =====" % (label, rc))
+        if tail:
+            dump.append("  [stderr] " + tail.replace("\n", "\n  "))
+        if body:
+            lines = body.splitlines()
+            dump.append("\n".join("  " + l for l in lines[:45]))
+            if len(lines) > 45:
+                dump.append("  …（共 %d 行，此处截取前 45 行）" % len(lines))
+        else:
+            dump.append("  (无输出)")
+        dump.append("")
+    EXTRA_DUMP = dump
+
+
 def main():
     # 先把 stdout 改成 utf-8 + 容错，保证**脚本自己**不会因为中文崩溃
     # （原始编码已经在 ORIG_STDOUT_ENC 里记下来了，报告里会体现）
@@ -658,7 +964,7 @@ def main():
 
     for fn in (check_system, check_encoding, check_runtime, check_files,
                check_cmds, check_ports, check_httpserver, check_dns,
-               check_app_real, check_clients):
+               check_app_real, check_clients, check_outlets, check_win_env):
         try:
             fn()
         except BaseException as e:      # noqa: BLE001 —— 单项崩了不能拖垮整份报告

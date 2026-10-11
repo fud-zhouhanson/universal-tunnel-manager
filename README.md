@@ -135,10 +135,12 @@ universal-tunnel-manager/
   四、接口证据               scan_interfaces_mac / scan_interfaces_win / is_tunnel_iface
   五、路由证据               default_route / iface_of / phys_gateway
   六、配置                   load_config / save_config / resolve_a
-  六.5、自动追踪             _scan_history_once / auto_domains_loop（浏览器历史 → 目标域名）
+  六.5、自动追踪             _scan_history_once / auto_domains_loop / managed_domains
+                             / _extract_domain（浏览器历史 → 目标域名；读取状态经 auto_status 上报）
   七、归属判定               classify_tunnel（四层证据融合）
   八、统一扫描               do_scan / scan_mac / scan_win / scan_domains
   九、路由操作               do_apply / do_undo / route_add_cmd / route_del_cmd
+                             （do_apply 吃 managed_domains() = 配置表 + 追踪集，已去重）
   十、HTTP 服务              GET /api/scan · POST /api/apply|undo|config|sudo|auto/*
 ```
 
@@ -151,7 +153,9 @@ universal-tunnel-manager/
 | POST | `/api/sudo` | (mac) 验证并缓存 sudo 密码 |
 | POST | `/api/auto/enable` | 开启自动追踪（扫浏览器历史） |
 | POST | `/api/auto/disable` | 关闭自动追踪并清空追踪集 |
-| POST | `/api/auto/pin` | 手动把一个域名加入追踪集 |
+| POST | `/api/auto/pin` | 手动把一个域名加入追踪集（body `{domain}`，可粘整条 URL，会规范化成主机名） |
+| POST | `/api/auto/promote` | **把追踪中的域名「转正」**：写进配置表 → 长期生效，并从追踪集移除 |
+| POST | `/api/auto/unpin` | 立刻停止追踪某个域名 |
 | POST | `/api/outlet/switch` | **切到某个出口**（body `{key}`）：停掉其它在跑的 + 启动目标 + 清残留路由 |
 | POST | `/api/outlet/start` · `/api/outlet/stop` | 单独启 / 停某个出口（body `{key}`） |
 | POST | `/api/scene/game` | （旧）等价于 switch 到加速器 |
@@ -198,7 +202,8 @@ universal-tunnel-manager/
 
 ### 6.2 自动追踪（新开的网站自动进出）
 
-**需求对应**：用户打开一个新网站 → 它自动出现在目标域名表里；关掉后 → 自动移除。
+**需求对应**：用户打开一个新网站 → 它自动出现在目标域名表里，点「应用」就连它一起加直连路由；
+关掉后 → 自动移除。
 
 **实现**：后台每 `AUTO_INTERVAL = 30` 秒**只读**扫一遍浏览器历史库
 （Chrome / Edge / Brave / Firefox / Safari 的 `History`，Chrome 运行时先复制到临时文件再读，
@@ -208,13 +213,34 @@ universal-tunnel-manager/
 |---|---|---|
 | `AUTO_WINDOW` | 180 秒 | 最近 3 分钟内访问过的域名 → 视为「正在看」，加入追踪集 |
 | `AUTO_EXPIRE` | 600 秒 | 超过 10 分钟没再访问 → 视为「已关闭」，从追踪集移除 |
+| `AUTO_MAX` | 60 | 追踪集上限，超出丢最旧的（见下方「为什么要有上限」） |
 
 - 追踪到的域名在前端「自动追踪」卡片里以 chips 展示，并**并入主路由表**（带「自动」标签、半透明行）。
+- **追踪到的域名会真正参与「应用」**：`do_apply()` 用的是 `managed_domains()`
+  （配置表 + 追踪集，已去重），不是只有配置表。每个 chip 后面有
+  「转正」（写进配置表 → 长期生效）与「✕」（立刻停止追踪）两个按钮。
 - 时间戳换算：Chrome/Edge 用 1601 起的微秒，Firefox 用 1970 起的微秒，Safari 用 2001 起的秒。
 - **隐私**：纯本机内存运算，不落盘、不上传、不记录访问内容，只取主机名。
-- **权限**：Safari 历史库受 macOS「完全磁盘访问」保护，需给终端授权；拿不到权限时用卡片里的
-  手动输入框（`＋ 加入追踪`）兜底 —— 它走 `/api/auto/pin`，把一个域名直接塞进追踪集，
-  之后和浏览器发现的域名享受同样待遇（10 分钟不活跃自动移除）。
+- **权限**：Safari 历史库受 macOS「完全磁盘访问」保护。**权限不足不再静默失败** ——
+  `_scan_history_once()` 会返回每个历史库的读取状态（`ok` / `denied` / `error`），
+  经 `/api/scan` 的 `auto_status` 字段送到卡片上，
+  明确写出「读不到：Safari —— 被系统隐私保护挡住了」以及授权步骤。
+  拿不到权限时用卡片里的手动输入框（`＋ 加入追踪`）兜底 —— 它走 `/api/auto/pin`。
+
+#### 本节的三个坑（都踩过，别改回去）
+
+| 坑 | 症状 | 正确做法 |
+|---|---|---|
+| **剥掉 `www.`** | 访问 `www.zhihu.com` 存成 `zhihu.com`，`apply` 给 apex 的 IP 加路由 —— 而浏览器连的是 www 的 IP，**两条路完全不重合**，功能看着成功、实际零生效。实测 6 个国内站（百度/知乎/腾讯/网易/B站/淘宝）apex 与 www 解析结果**交集全为 0**，只有本来就无 www 的 `github.com` 对得上 | `_extract_domain()` **原样保留 host**，只剥 scheme / userinfo / 路径 / 端口 |
+| **吞掉读取异常** | `except: pass` 之后界面永远显示「追踪中 · 0 个」，用户分不清是没开浏览器、没授权、还是刚看的都超了 3 分钟 | 每次扫描留一份 `_auto_status`，把 `denied` / `error` 如实送到前端 |
+| **临时文件不在 finally 删** | Chrome 的库要先复制再读；复制失败时 `unlink` 被跳过，**每 30 秒泄漏一个副本** | `os.unlink` 放 `finally` |
+
+> **为什么要有 `AUTO_MAX` 上限**：追踪到的域名现在真的会变成直连路由，每个域名解析出 2~4 个 IP，
+> 而 Windows 上每条 IP 要起两次 `route.exe`（先 `delete` 再 `-p add`）。
+> 不设上限的话，浏览一天攒出上百个域名 → 数百次进程创建，会逼近 `run_elevated_win` 的 90 秒超时。
+
+> **追踪是临时的**：10 分钟没再看就会自动移除。要让它长期生效，点 chip 后的「转正」写进配置表。
+> 这一点在卡片文案和 toast 里都写明了 —— 以前只写「已加入追踪 ✓」，用户过 10 分钟发现它不见了却不知道为什么。
 
 ### 6.3 自动排除隧道客户端「自身服务器 IP」（安全护栏）
 
@@ -495,6 +521,182 @@ aTrust  1/8 … 240/4，共 152 条                                → utun7
 在「现在一切正常」的时候存一份 `~/.tunnel-manager/health.json`：
 物理网卡 / 网关 / 网络服务名 / DHCP DNS / 当前 DNS。
 以后应急恢复会**优先还原它**，而不是一律清空 —— 这样用户自己本来就有的自定义 DNS 不会被误伤。
+
+---
+
+## 六·九、实时流速（`GET /api/flow`）
+
+回答一个「体检」答不了的问题：**流量现在在哪条网上跑、跑多快。**
+
+### 数据从哪来
+
+读 `netstat -ib` 里**每个接口开机以来的累计收发字节**（`Ibytes` / `Obytes`），
+相邻两次采样做差分 → 速率。所以它是**实测值**，不是估算，也**不额外花任何流量**。
+
+| 手段 | 单次开销 | 能回答 | 不能回答 |
+|---|---|---|---|
+| `netstat -ib`（**本模块**） | 约 12 ms，**免 root** | 每条网卡跑多快、隧道占多少 | 是哪个程序在跑 |
+| `nettop` 逐进程（Steam 采样那套） | **约 5 秒**固定开销 | 是哪个进程、连到哪个中继 | 流量走了哪条网卡 |
+
+两者不是替代关系：**判断「隧道跑多快」只能靠接口级计数**。原因是隧道客户端在内核里转发，
+进程级的 socket 计数与「过隧道的字节」并不相等。
+
+### 三个数 + 一条曲线
+
+- **下行 / 上行**：物理网卡上的真实速率（这条线一共跑了多少）。
+- **走隧道占比**：隧道接口速率 ÷ 物理网卡速率。⚠️ 这是**近似下限** ——
+  隧道流量会「双层计数」（明文过 `utunN`，加密后从 `en0` 出去），
+  所以 `en0` 的字节数 ≈ 隧道字节 + 加密开销 + 真正的直连流量。
+  界面上如实标注「近似值」，不假装精确。
+- **60 点环形缓冲**：横轴是最近 60 个采样点（每秒一格），面积图是总下行、线是总上行、
+  红色虚线是其中走隧道的部分。只保留窗口内**真正动过的接口** ——
+  本机常见的二十多个死接口不会塞给前端（实测整个响应约 **0.6 KB**）。
+- 表格里每行一条接口，最后一列是该接口下行速率的**迷你曲线**；「归属」列复用主扫描的判定。
+
+### 省电设计
+
+- **按需启动**：第一个 `GET /api/flow` 才拉起采样线程，**空闲 3 分钟自动退出**。
+- **只在可见时轮询**：前端用 `IntersectionObserver` 盯着卡片，滚出视口就停止轮询
+  （也可以手动点「⏸ 暂停」）。
+
+### 平台差异（如实说明）
+
+| 平台 | 数据源 | 状态 |
+|---|---|---|
+| macOS | `netstat -ib` 的 `Ibytes` / `Obytes` | ✅ 本机实测（实测抓到 11.7 MB/s 的真实下载速率） |
+| Windows | `Get-NetAdapterStatistics`（`ReceivedBytes` / `SentBytes`，免管理员） | ⚠️ **未在真机验证** |
+| Linux | —— | ❌ 不支持（`netstat -b` 在该平台语义不同） |
+
+Windows 侧认不出物理网卡时（适配器名是中文的情况），会把「所有非回环接口之和」当作总量，
+前端如实降级提示，而不是硬猜一个数出来。
+
+---
+
+## 六·十、出口切换在 Windows 上怎么做的
+
+macOS 侧「切出口」靠三样东西：`/Applications` 里的 `.app`、launchd 作业、`scutil --nc`。
+**这三样 Windows 都没有**，所以切换在 Windows 上原先是整段不可用的（直接返回
+「出口切换当前仅支持 macOS」）。现在给 Windows 配了一套等价物：
+
+| 可控点 | macOS | Windows |
+|---|---|---|
+| 找到客户端 | 扫 `/Applications` 的 `.app` | 读注册表三个「卸载」键（HKLM / WOW6432Node / HKCU） |
+| 找到可停的东西 | launchd 作业（`.plist`） | **SCM 服务**（`Get-Service`） |
+| 启停 | `launchctl bootout` / `bootstrap` | `Stop-Service -Force` / `Start-Service`（UAC 提权） |
+| 打开客户端 | `open -a` | `Start-Process`（`os.startfile`） |
+| 系统自带 VPN | `scutil --nc start/stop` | `rasdial` 连接 / `/disconnect` |
+
+Windows 上还多一类出口：**系统自带的 VPN 连接**。它的名字是用户自己起的，没法用关键词匹配，
+所以单独枚举（`Get-VpnConnection`），一个连接一个出口，用 `rasdial` 开关，**不依赖任何客户端 App**。
+
+### 为什么不去查「服务名叫什么」
+
+`OUTLET_RULES` 里给 aTrust 写死的 `stop_jobs` 是 macOS 的 launchd 标签
+（`com.sangfor.aTrustTunnel` 之类），**在 Windows 上根本不存在**。
+所以 Windows 侧**不读那张表**，一律按 `TUNNEL_KNOWLEDGE` 的关键词去实测枚举 SCM 服务
+（关键词短于 4 个字符的不参与匹配，免得 `wg`、`ssr` 这种撞上系统自带服务）。
+枚举不到就老实退化成「请手动操作」—— 宁可不动，也不去停一个猜错的服务。
+
+### 提权：UAC ≠ sudo
+
+Windows 的提权是弹 UAC，**没有密码可输**。所以后端对前端用了两个不同的错误码：
+
+- `NEED_SUDO` —— macOS，前端弹密码框
+- `NEED_ADMIN` —— Windows，前端只提示「点 UAC 的『是』」并给一个「立即重试」
+
+（顺带修掉一个真 bug：`outlet_stop()` 过去只看「返回码是不是 403」就报成功，
+其它非零返回码——比如命令根本跑不动——也会显示「已停止」。用户以为关掉了，其实没关。
+现在按返回码如实判定。Windows 侧则改用「脚本自己喊一句 `__TM_OK__`」来判定，
+因为 PowerShell 的 cmdlet **不设置** `$LASTEXITCODE`，看返回码本身就不靠谱。）
+
+### ⚠️ 未在真机验证（务必保持这句）
+
+**本机是 macOS，上面这一整套 Windows 实现没有在任何 Windows 机器上跑通过。**
+要确认它在你那台机器上行不行，用包里的体检工具：
+
+```
+双击  检查运行.bat           （或命令行：python selftest.py）
+```
+
+报告里的**第十一段「出口切换的探测层（Windows）」**会逐项告诉你：
+
+- 注册表读不读得到已安装程序
+- SCM 服务能不能枚举、能不能按关键词匹配到隧道客户端
+- 系统 VPN 能不能列出来
+- 有哪些「指向已消失接口」的残留路由（**只列不删**）
+- 将要执行的那段 PowerShell 长什么样（方便直接复制回来反馈）
+
+这一段**全程只读**：不停任何服务、不改任何路由、也不会主动弹 UAC。
+
+---
+
+## 六·十一、PowerShell 被安全策略禁掉时怎么办（原生回退层）
+
+### 起因：一台真机的报告
+
+2026-10-11 收到一份 Windows 11 的真机自检报告，上面有这样一行：
+
+```
+[注意] powershell Get-NetRoute   返回码 None；
+       无法执行：[WinError 786] 管理员用策略规则限制了对 powershell.exe 的访问。
+```
+
+也就是说**那台机器上 `powershell.exe` 根本起不来**（被安全管理软件的策略挡住了，
+装了深信服 / 奇安信 / 360 企业版这类软件的电脑常见）。
+
+而这一版之前的 Windows 实现**几乎全部靠 PowerShell**：
+读网卡用 `Get-NetAdapter`、读默认路由用 `Get-NetRoute`、
+读服务用 `Get-Service`、读系统 VPN 用 `Get-VpnConnection`、
+读流速用 `Get-NetAdapterStatistics`……
+
+后果不是崩溃，而是更难受的一种：**程序正常启动，但什么都看不到**。
+（模拟验证：`do_scan()` 返回 0 个接口、`phys_iface` 为空、出口只剩「物理直连」。）
+
+### 解决办法：只吃 System32 里的原生命令
+
+新增一层 `_nat_*` 解析（`server.py` 第四节末尾），**优先 PowerShell，
+探测到不可用就整体切到原生命令**。选命令时刻意挑「不受系统语言影响」的部分：
+
+| 要读什么 | 原生命令 | 为什么挑它 |
+|---|---|---|
+| 接口列表 | `route print -4` | 接口列表行是「序号 + 点 + 名字」，中英文排版一致 |
+| 路由表 | `route print -4` | 表格本身是纯数字，不翻译 |
+| 接口 IP | `netsh interface ipv4 show addresses` | 值都是地址，标签本地化没关系 |
+| 接口序号 ↔ IP | `arp -a` | `192.168.1.5 --- 0x5` 这行中英文完全一样 |
+| 已安装程序 | `winreg`（**标准库**） | 直接读注册表，比 `reg query` 稳 |
+| Windows 服务 | `sc query type= service state= all` | 字段名恒为英文（SERVICE_NAME / DISPLAY_NAME / STATE） |
+| 进程 | `tasklist /fo csv /nh` | CSV 列固定，镜像名是 ASCII |
+| 系统 VPN | `rasphone.pbk` | 就是一个 INI 文件，读文件即可 |
+| TCP 连接 | `netstat -ano` + `tasklist` | 状态名恒为英文（ESTABLISHED） |
+| 提权 | `cmd.exe /c <临时 bat>` | PowerShell 起不来时 `runas` 只能挂 cmd |
+
+两个细节值得一提：
+
+- **`IP → 走哪个网卡`是自己算最长前缀匹配的**，不再依赖 `Find-NetRoute`。
+  路由表是纯数字，所以这一步反而比 PowerShell 版更稳；
+  而且打了平局时按「路由跃点 + 接口跃点」取小值 ——
+  Windows 真正据以选路的就是这个有效跃点数。
+- **提权不走「PS 失败后再补一次原生」**。那样用户会连着吃两个 UAC 弹窗。
+  走哪条路只看一次探测结论（缓存 5 分钟）。
+
+### 界面上怎么体现
+
+前端顶部会出现一条橙色提示（只在 Windows 且 PowerShell 不可见时）：
+
+> ⚠ 本机的 PowerShell 被安全策略禁用，已自动改用系统原生命令读取（当前读到 N 个网卡）。
+> 「网卡 / 隧道 / 出口」这些仍然可用，但实时流速会退化成整机总量……
+
+自检脚本新增**第十二段「系统查询通道」**，逐项验证原生回退有没有顶上，
+并把 `route print` / `arp -a` / `netsh` / `sc query` 的**原始输出**附在报告末尾 ——
+万一哪一项没解析出来，凭那段就能精确定位。
+
+### ⚠️ 同样未在真机验证
+
+这一层和上面那套一样，**本机是 macOS，没有在真机上跑过**。
+验证方式是「拿真实格式的命令输出喂给解析器」——覆盖了 40 余项断言
+（中文 `在链路上` / 中文 `已连接` · `已断开` / 8 字节 MAC 的 ISATAP 行 /
+无 MAC 的回环行 / 永久路由不误认 / `rasphone.pbk` 编码 …），全部通过。
+但**真实 Windows 的排版仍可能与样本有出入**，所以第十二段的原始输出 dump 才是关键。
 
 ---
 

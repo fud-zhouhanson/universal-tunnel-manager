@@ -178,6 +178,45 @@
   /* 统一的空状态 */
   .empty { color: var(--dim); font-size: var(--fs-sm); padding: 12px 0 12px 2px; }
 
+  /* ==========================================================
+     实时流速（接口级）
+     ========================================================== */
+  .flow-hero {
+    display: grid; gap: 10px; margin-top: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  }
+  .flow-big {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 11px 14px;
+    transition: border-color .18s, background .18s;
+  }
+  .flow-big:hover { background: var(--panel3); border-color: #454c58; }
+  .flow-big .k { font-size: var(--fs-xs); color: var(--dim); letter-spacing: .4px; }
+  .flow-big .v {
+    font-size: 27px; font-weight: 700; line-height: 1.25;
+    letter-spacing: -.6px; font-variant-numeric: tabular-nums;
+  }
+  .flow-big .v small { font-size: var(--fs-sm); font-weight: 500; color: var(--dim); letter-spacing: 0; }
+  .flow-big .s { font-size: var(--fs-xs); color: var(--dim); margin-top: 1px; }
+
+  /* 吞吐曲线：靠 viewBox 拉伸铺满，非等比缩放用 non-scaling-stroke 保住线宽 */
+  .flow-chart {
+    position: relative; height: 104px; margin-top: 12px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: var(--r); overflow: hidden;
+  }
+  .flow-chart svg { display: block; width: 100%; height: 100%; }
+  .flow-legend {
+    display: flex; gap: 18px; flex-wrap: wrap;
+    font-size: var(--fs-xs); color: var(--dim); margin-top: 8px;
+  }
+  .flow-legend i {
+    display: inline-block; width: 10px; height: 3px; border-radius: 2px;
+    vertical-align: middle; margin-right: 6px;
+  }
+  .spark { display: block; width: 118px; height: 24px; }
+  .spark path { fill: none; stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; }
+
   /* 操作反馈行（执行中 / 结果 / 出错都用它）：左内容、右按钮，窄屏自动换行 */
   .ops-row {
     display: flex; justify-content: space-between; align-items: flex-start;
@@ -275,6 +314,25 @@
   .chip.proxy { border-color: rgba(67,217,255,.5);  color: var(--cyan);   background: rgba(67,217,255,.09); }
   .chip.acc   { border-color: rgba(255,165,61,.5);  color: var(--orange); background: rgba(255,165,61,.09); }
   .chip.net   { border-color: rgba(61,220,132,.5);  color: var(--green);  background: rgba(61,220,132,.09); }
+
+  /* 追踪条目上的小按钮（转正 / 停止追踪）—— 让「看到问题」能就地处理 */
+  .chip.hasbtns { display: inline-flex; align-items: center; gap: 6px; padding-right: 5px; }
+  .chipbtn {
+    font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer;
+    padding: 1px 7px; border-radius: var(--r-pill); line-height: 1.5;
+    border: 1px solid var(--border); background: transparent; color: var(--text-2);
+  }
+  .chipbtn:hover { border-color: currentColor; opacity: .85; }
+  .chipbtn.go   { color: var(--cyan); }
+  .chipbtn.off  { color: var(--dim); padding: 1px 6px; }
+
+  /* 自动追踪的「体检结论」：为什么这里是空的 */
+  .autostatus {
+    font-size: var(--fs-xs); line-height: 1.75; color: var(--text-2);
+    border-left: 3px solid var(--border); padding: 7px 0 7px 10px; margin-bottom: 12px;
+  }
+  .autostatus.bad { border-left-color: var(--red); }
+  .autostatus.ok  { border-left-color: var(--green); }
 
   .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: var(--fs-sm); letter-spacing: -.15px; }
 
@@ -510,6 +568,14 @@
   .callout.bad b { color: #ffc0bb; }
   .callout.bad a { color: inherit; text-decoration: underline; }
 
+  /* Windows 系统读取通道告警（PowerShell 被安全策略禁掉时） */
+  .callout.warn {
+    background: rgba(255,165,61,.1);
+    border-color: rgba(255,165,61,.45);
+    color: var(--orange);
+  }
+  .callout.warn b { color: #ffd9ab; }
+
   /* ==========================================================
      分区与锚点
      ========================================================== */
@@ -591,6 +657,10 @@
     .metrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .metric { padding: 9px 11px; }
     .metric .v { font-size: var(--fs-md); }
+    .flow-hero { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .flow-big { padding: 9px 11px; }
+    .flow-big .v { font-size: 21px; }
+    .spark { width: 84px; }
     .actions { flex-direction: column; align-items: stretch; }
     .actions button { width: 100%; }
     .actions .push { margin-left: 0; }
@@ -646,6 +716,7 @@
   <nav class="nav" id="nav" aria-label="页面分区导航">
     <div class="nav-links">
       <a class="nav-a" href="#s-overview">概览</a>
+      <a class="nav-a" href="#s-flow">流速</a>
       <a class="nav-a" href="#s-health">体检急救</a>
       <a class="nav-a" href="#s-outlets">出口管理</a>
       <a class="nav-a" href="#s-routes">域名路由</a>
@@ -671,6 +742,9 @@
 
 <main id="main">
 
+<!-- ── 环境提示：Windows 上系统的读取通道可能被安全策略挡掉 ── -->
+<div class="callout warn" id="winEnvWarn" style="display:none"></div>
+
 <!-- ── 概览：一眼看清"现在什么状态 + 能做什么" ─────────── -->
 <section class="card" id="s-overview" aria-labelledby="h-overview">
   <div class="card-head">
@@ -695,6 +769,30 @@
   </div>
   <div class="legend" id="legend"></div>
   <div class="callout bad" id="truthWarn" style="display:none;margin-top:12px"></div>
+</section>
+
+<!-- ── 实时流速：回答"流量现在在哪条网上跑、跑多快" ─────── -->
+<section class="card" id="s-flow" aria-labelledby="h-flow">
+  <div class="card-head">
+    <h2 id="h-flow">实时流速</h2>
+    <span class="grow"></span>
+    <div class="tools">
+      <span class="meta" id="flowMeta"></span>
+      <button id="btnFlowToggle" type="button"
+        title="暂停后就停止采样，页面切走时也会自动停 —— 不占后台">⏸ 暂停</button>
+    </div>
+  </div>
+  <div class="sub" style="margin-bottom:10px">
+    直接读网卡<b>累计收发的字节数</b>做差分得出速率 —— <b>是实测值，不是估算，也不额外花流量</b>。<br>
+    · <b>下行 / 上行</b>：物理网卡上的真实速率（你这条线一共跑了多少）。<br>
+    · <b>走隧道占比</b>：隧道接口速率 ÷ 物理网卡速率。隧道流量会「双层计数」（明文过隧道、密文再从物理网卡出去），
+    所以这个比例是<b>近似下限</b>，不是精确值。<br>
+    · 表里的「归属」来自上面「当前状态」那次扫描，对不上就只按接口名分类。
+  </div>
+  <div class="flow-hero" id="flowHero"></div>
+  <div class="flow-chart" id="flowChart" role="img" aria-label="最近 60 秒总吞吐曲线"></div>
+  <div class="flow-legend" id="flowLegend"></div>
+  <div id="flowTbl" style="margin-top:12px"></div>
 </section>
 
 <!-- ── 体检与急救：出问题时第一个该来的地方 ───────────── -->
@@ -746,6 +844,7 @@
     · 「直连 ✓」= 走物理网卡（你家/学校的正常网络） · 「被隧道接管」= 走了 VPN/加速器/梯子<br>
     · 想把某个网站从隧道里「拔出来」→ 用顶部「⇄ 切到本机直连」，它会给这些域名逐个加 /32 直连路由<br>
     · 要增删域名，用下面紧邻的「<a href="#s-domains" style="color:var(--cyan)">需要直连的域名列表</a>」；也可以开「<a href="#s-auto" style="color:var(--cyan)">自动追踪</a>」让新开的网站自动出现
+    <span class="tone-dim">（追踪是临时的，看到想长期保留的点它后面的「转正」）</span>
   </div>
   <div id="vpnExclBox" class="callout" style="display:none"></div>
   <div class="skel" id="domSkeleton">扫描中…</div>
@@ -774,10 +873,12 @@
     <div class="tools"><span class="meta" id="autoCount"></span></div>
   </div>
   <div class="sub" style="margin-bottom:10px">
-    开着之后，你浏览器里<b>新打开的网站会自动出现在上面的路由表里</b>；关掉超过 10 分钟没再看的会自动移除。<br>
-    原理：每 30 秒只读扫一次浏览器历史（Chrome / Edge / Firefox / Safari）。<b>不记录、不上传任何数据</b>，只在本机内存里转一圈。<br>
-    Safari 需要在「系统设置 → 隐私与安全性 → 完全磁盘访问」里给终端授权；没有权限时用下面的输入框手动加。
+    开着之后，你浏览器里<b>新打开的网站会自动出现在上面的路由表里</b>；点「应用」就会连它们一起加直连路由。<br>
+    ⚠️ 追踪是<b>临时</b>的：只收最近 3 分钟内访问过的，超过 10 分钟没再看就自动移除 ——
+    要让它长期生效，点名字后面的「转正」（写进下面那份域名列表）。<br>
+    原理：每 30 秒只读扫一次浏览器历史（Chrome / Edge / Firefox / Safari）。<b>不记录、不上传任何数据</b>，只在本机内存里转一圈。
   </div>
+  <div class="autostatus" id="autoStatus" style="display:none"></div>
   <div class="actions" style="margin-top:0;margin-bottom:12px">
     <button id="btnAutoEnable" class="primary">▶ 开启自动追踪</button>
     <button id="btnAutoDisable" class="warn">⏸ 关闭自动追踪</button>
@@ -1051,6 +1152,8 @@ function render(s) {
     }
   }
 
+  renderWinEnv(s);
+
   // 当前情景
   const sc = s.scene || {};
   const sceneCls = { game: 'mode-tunnel', campus: 'mode-direct',
@@ -1179,9 +1282,16 @@ function render(s) {
   $('btnAutoDisable').disabled = !autoOn;
   const acnt = $('autoCount');
   if (acnt) acnt.textContent = autoOn ? '追踪中 · ' + (s.auto_domains || []).length + ' 个' : '未开启';
-  $('autoChips').innerHTML = (s.auto_domains || []).length
-    ? s.auto_domains.map(d => `<span class="chip net">${esc(d)}</span>`).join('')
+  const autoList = s.auto_domains || [];
+  $('autoChips').innerHTML = autoList.length
+    ? autoList.map(d =>
+        `<span class="chip net hasbtns">${esc(d)}` +
+        `<button class="chipbtn go" data-promote="${esc(d)}" ` +
+        `title="写进「需要直连的域名列表」，长期生效、不再自动移除">转正</button>` +
+        `<button class="chipbtn off" data-unpin="${esc(d)}" title="立刻停止追踪">✕</button>` +
+        `</span>`).join('')
     : '<div class="empty">暂无正在追踪的网站 — 开着之后新开的网页会自动出现在这里（约 30 秒延迟）</div>';
+  renderAutoStatus(s);
 
   // 自动域名的路由走向也并入主表展示
   if (s.auto_rows && s.auto_rows.length) {
@@ -1372,6 +1482,20 @@ async function switchOutlet(path, key, name) {
       askPassword({ path, label: '操作「' + label + '」', body: { key } });
       return;
     }
+    if (r.status === 403 && j.error === 'NEED_ADMIN') {
+      // Windows 上没有 sudo 密码可输 —— 权限就是 UAC 弹窗，点「是」就行。
+      // 所以这里不给密码框，免得用户对着一个没用的输入框发呆。
+      box.innerHTML = `<div class="ops-row"><div class="sub">`
+        + `这一步需要管理员授权：会弹出 <b>UAC 确认框</b>，点「是」即可。</div>`
+        + `<button class="primary" data-admin-retry>立即重试</button>`
+        + `<button data-ops-close>取消</button></div>`;
+      box.querySelector('[data-ops-close]').onclick = closeBox;
+      box.querySelector('[data-admin-retry]').onclick = () => {
+        box.innerHTML = '';
+        switchOutlet(path, key, name);
+      };
+      return;
+    }
     const res = j.identify || j.outlet || {};
     let html = j.message ? '<div class="sub"><b>' + esc(j.message) + '</b></div>' : '';
     (res.done || []).forEach(d => {
@@ -1401,6 +1525,9 @@ async function doAction(path, label) {
     const [r, j] = await postJson(path);
     if (r.status === 403 && j.error === 'NEED_SUDO') {
       askPassword({ path, label }); return;
+    }
+    if (r.status === 403 && j.error === 'NEED_ADMIN') {
+      toast('需要管理员授权：在弹出的 UAC 窗口里点「是」后重试', 6000); return;
     }
     if (r.status === 403 && j.error === 'BAD_PASSWORD') {
       toast('密码错误，请重试'); askPassword({ path, label }); return;
@@ -1468,7 +1595,104 @@ $('btnResetDomains').onclick = async () => {
     'github.com','www.zhihu.com'].join('\n');
 };
 
+// ---- Windows 系统读取通道（PowerShell 是否被安全策略挡掉）----
+function renderWinEnv(s) {
+  const box = $('winEnvWarn');
+  if (!box) return;
+  const w = s.win_env || {};
+  // 非 Windows 时后端返回空对象 —— 不显示
+  if (!s.win_env || w.powershell !== false) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = '';
+  box.className = 'callout ' + (w.native_fallback ? 'warn' : 'bad');
+  const head = w.native_fallback
+    ? '本机的 PowerShell 被安全策略禁用，已自动改用系统原生命令读取'
+    : '<b>本机的 PowerShell 被安全策略禁用，原生命令也没读到网卡信息</b>';
+  box.innerHTML = '⚠ ' + head +
+    (w.native_fallback
+      ? `（当前读到 ${w.native_ifaces} 个网卡）。<br>` +
+        '「网卡 / 隧道 / 出口」这些仍然可用，但<b>实时流速</b>会退化成整机总量、' +
+        '开关隧道时要多等一会儿。<br>如果你是在受管理的电脑上，这是正常现象，不是程序出错。'
+      : '。<br>本机可能装了企业安全管理软件。程序仍能启动，但依赖系统查询的功能会不全。') +
+    (w.powershell_error
+      ? `<br><span class="meta">原始错误：${esc(w.powershell_error)}</span>` : '');
+}
+
 // ---- 自动追踪 ----
+// 自动追踪的「体检结论」：直接回答「这里为什么是空的」。
+// 以前后端把读取异常全吞了，界面只会显示「追踪中 · 0 个」，
+// 用户分不清是没开浏览器、没给权限、还是刚看的都超了 3 分钟。
+function renderAutoStatus(s) {
+  const box = $('autoStatus');
+  if (!box) return;
+  if (!s.auto_enabled) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const st = s.auto_status || {};
+  const srcs = st.sources || [];
+  const good = [], denied = [], broken = [];
+  srcs.forEach(x => {
+    if (x.state === 'ok') good.push(x);
+    else if (x.state === 'denied') denied.push(x);
+    else broken.push(x);
+  });
+
+  const lines = [];
+  if (st.error) {
+    lines.push(`<b class="tone-red">扫描线程出错</b>：${esc(st.error)}`);
+  }
+  if (good.length) {
+    lines.push(`<span class="tone-green">已读到</span>：` +
+      good.map(x => `${esc(x.kind)} ${x.n} 条`).join('、'));
+  }
+  if (denied.length) {
+    lines.push(`<b class="tone-red">读不到</b>：${denied.map(x => esc(x.kind)).join('、')}` +
+      ` —— 被系统隐私保护挡住了。<br>macOS：打开「系统设置 → 隐私与安全性 → 完全磁盘访问」，` +
+      `把启动本程序的终端打上勾，然后<b>重启本程序</b>（Windows 一般不需要授权）。`);
+  }
+  broken.forEach(x => lines.push(
+    `<b class="tone-red">读取失败</b>：${esc(x.kind)} — ${esc(x.msg || '未知原因')}`));
+  if (!srcs.length) {
+    lines.push('没找到任何浏览器历史库（Chrome / Edge / Firefox / Safari 都没装或都还没访问过）—— ' +
+      '用下面的输入框手动加。');
+  } else if (!denied.length && !broken.length && good.length && !(s.auto_domains || []).length) {
+    const win = Math.round((s.auto_window || 180) / 60);
+    lines.push(`历史库读到了，但最近 ${win} 分钟内没有新的访问记录 —— 这是正常的。` +
+      `去开几个网页，30 秒内就会出现在上面。`);
+  }
+  if (!lines.length) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.className = 'autostatus' + ((denied.length || broken.length || st.error) ? ' bad' : ' ok');
+  box.innerHTML = lines.join('<br>');
+  box.style.display = '';
+}
+
+// 追踪条目上的「转正 / 停止追踪」—— 事件委托，chips 被重绘也不会失效
+async function autoAct(path, domain, pending) {
+  toast(pending, 1500);
+  try {
+    const [r, j] = await postJson(path, { domain });
+    if (r.ok) {
+      toast(j.message || '完成 ✓');
+      if (j.result) render(j.result); else refresh();
+    } else toast('操作失败：' + (j.message || j.error));
+  } catch (e) { toast('操作出错：' + e.message); }
+}
+$('autoChips').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.promote) autoAct('/api/auto/promote', b.dataset.promote, '转正中…');
+  else if (b.dataset.unpin) autoAct('/api/auto/unpin', b.dataset.unpin, '停止追踪中…');
+});
+
 $('btnAutoEnable').onclick = () => doAction('/api/auto/enable', '开启自动追踪');
 $('btnAutoDisable').onclick = () => doAction('/api/auto/disable', '关闭自动追踪');
 $('btnQuickAdd').onclick = async () => {
@@ -1788,6 +2012,14 @@ async function doRescue() {
     if (r.status === 403 && j.error === 'NEED_SUDO') {
       box.innerHTML = '<div class="sub">需要管理员密码才能改路由和 DNS</div>';
       askPassword({ path: '/api/rescue', label: '一键应急恢复' });
+      return;
+    }
+    if (r.status === 403 && j.error === 'NEED_ADMIN') {
+      box.innerHTML = `<div class="ops-row"><div class="sub">`
+        + `需要管理员授权：会弹出 <b>UAC 确认框</b>，点「是」即可。</div>`
+        + `<button class="primary" id="rescueAdminRetry">立即重试</button></div>`;
+      const rb = $('rescueAdminRetry');
+      if (rb) rb.onclick = doRescue;
       return;
     }
     renderRescue(j);
@@ -2225,6 +2457,208 @@ function renderSteamDiag(j) {
   const out = $('steamDiagOut');
   if (out) out.innerHTML = h;
 }
+
+/* ══════════════════════════════════════════════════════════
+   实时流速（接口级）
+   数据来自后端每 1 秒对「网卡累计收发字节」做一次差分；
+   这里只负责画。轮询只在卡片进入视口时跑 —— 页面切走自动停，
+   后端那边闲置 3 分钟也会自行结束采样线程。
+   ══════════════════════════════════════════════════════════ */
+let flowTimer = null;
+let flowPaused = false;
+
+function rateParts(bps) {
+  if (bps == null || isNaN(bps)) return ['—', ''];
+  const v = Math.max(0, bps);
+  if (v < 1000) return [v.toFixed(0), 'B/s'];
+  if (v < 1000000) return [(v / 1000).toFixed(1), 'KB/s'];
+  return [(v / 1048576).toFixed(2), 'MB/s'];
+}
+function rateText(bps) { const [n, u] = rateParts(bps); return n + (u ? ' ' + u : ''); }
+
+function kindTag(k) {
+  const m = { '隧道': 'tag-tunnel', '物理': 'tag-ok', '系统虚拟': 'tag-dim', '其他': 'tag-dim' };
+  return `<span class="tag ${m[k] || 'tag-dim'}">${esc(k)}</span>`;
+}
+
+/* 迷你曲线：viewBox 与 CSS 尺寸可能不等比，用 non-scaling-stroke 保住线宽 */
+function sparkSVG(series, color) {
+  const n = (series || []).length;
+  if (n < 2) return '<span class="ns tone-dim">—</span>';
+  const w = 118, h = 24;
+  const mx = Math.max(1, Math.max.apply(null, series));
+  const step = w / (n - 1);
+  const d = series.map((v, i) =>
+    (i ? 'L' : 'M') + (i * step).toFixed(1) + ' ' +
+    (h - 2 - (v / mx) * (h - 5)).toFixed(1)).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">`
+    + `<path d="${d}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+/* 吞吐曲线：铺满宽度的面积图（下行面积 + 上行线 + 隧道下行虚线） */
+function flowChartSVG(sDn, sUp, sTn) {
+  const W = 1000, H = 100, n = sDn.length;
+  if (n < 2) return '';
+  const mx = Math.max(1, Math.max.apply(null, sDn), Math.max.apply(null, sUp));
+  const px = i => (i / (n - 1)) * W;
+  const py = v => H - 2 - (v / mx) * (H - 10);
+  const line = arr => arr.map((v, i) =>
+    (i ? 'L' : 'M') + px(i).toFixed(1) + ' ' + py(v).toFixed(1)).join(' ');
+  const grid = [0.25, 0.5, 0.75].map(p =>
+    `<line x1="0" y1="${Math.round(H * p)}" x2="${W}" y2="${Math.round(H * p)}"`
+    + ` stroke="rgba(255,255,255,.06)"/>`).join('');
+  const tun = sTn.some(v => v > 500)
+    ? `<path d="${line(sTn)}" fill="none" stroke="var(--red)" stroke-width="1.3"`
+      + ` stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>` : '';
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">`
+    + grid
+    + `<path d="${line(sDn)} L${W} ${H} L0 ${H} Z" fill="rgba(67,217,255,.15)" stroke="none"/>`
+    + `<path d="${line(sDn)}" fill="none" stroke="var(--cyan)" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`
+    + `<path d="${line(sUp)}" fill="none" stroke="var(--purple)" stroke-width="1.3" vector-effect="non-scaling-stroke"/>`
+    + tun
+    + '</svg>'
+    + `<span style="position:absolute;right:9px;top:6px;font-size:11px;color:var(--dim)">`
+    + `峰值 ${esc(rateText(mx))}</span>`;
+}
+
+function renderFlow(f) {
+  const hero = $('flowHero'), chart = $('flowChart');
+  const leg = $('flowLegend'), tbl = $('flowTbl'), meta = $('flowMeta');
+  if (!hero) return;
+
+  if (!f || f.ok === false || f.error) {
+    hero.innerHTML = '<div class="empty">取流速失败：'
+      + esc((f && f.error) || '后端没有返回数据') + '</div>';
+    chart.innerHTML = ''; leg.innerHTML = ''; tbl.innerHTML = '';
+    return;
+  }
+  if (!f.supported) {
+    hero.innerHTML = '<div class="empty">' + esc(f.note || '当前平台不支持接口级流速。') + '</div>';
+    chart.innerHTML = ''; leg.innerHTML = ''; tbl.innerHTML = '';
+    if (meta) meta.textContent = '';
+    return;
+  }
+
+  const all = f.rows || [];
+  const rows = all.filter(r => r.kind !== '回环');      // 回环不算"通行"流量
+  const tot = f.total || { down: 0, up: 0 };
+  const tun = f.tunnel || { down: 0, up: 0 };
+  const ratio = f.ratio;
+  const [dnv, dnu] = rateParts(tot.down);
+  const [upv, upu] = rateParts(tot.up);
+  const [tnv, tnu] = rateParts(tun.down);
+  const rtone = ratio == null ? 'tone-dim'
+    : ratio > 0.6 ? 'tone-red' : ratio > 0.12 ? 'tone-yellow' : 'tone-green';
+  const rtxt = ratio == null ? '—' : String(Math.round(ratio * 100));
+
+  hero.innerHTML = [
+    ['下行（物理网卡）', dnv, dnu, 'tone-cyan', ''],
+    ['上行（物理网卡）', upv, upu, 'tone-purple', ''],
+    ['走隧道占比', rtxt, ratio == null ? '' : '%', rtone,
+      ratio == null ? '' : (ratio > 0 ? '流量被隧道分走了一部分' : '全部走本机直连')],
+    ['隧道下行', tnv, tnu, tun.down > 1000 ? 'tone-red' : 'tone-dim',
+      tun.up > 100 ? '上行 ' + rateText(tun.up) : ''],
+  ].map(([k, v, u, tone, s]) =>
+    `<div class="flow-big"><div class="k">${esc(k)}</div>`
+    + `<div class="v ${tone}">${esc(v)}${u ? '<small> ' + esc(u) + '</small>' : ''}</div>`
+    + (s ? `<div class="s">${esc(s)}</div>` : '')
+    + '</div>').join('');
+
+  const n = rows.length ? (rows[0].hist_down || []).length : 0;
+  if (n >= 2) {
+    const phys = rows.filter(r => r.kind === '物理');
+    const base = phys.length ? phys : rows;          // 认不出物理网卡就退回全部接口
+    const sDn = new Array(n).fill(0), sUp = new Array(n).fill(0), sTn = new Array(n).fill(0);
+    base.forEach(r => (r.hist_down || []).forEach((v, i) => { sDn[i] += v; }));
+    base.forEach(r => (r.hist_up || []).forEach((v, i) => { sUp[i] += v; }));
+    rows.filter(r => r.kind === '隧道').forEach(r =>
+      (r.hist_down || []).forEach((v, i) => { sTn[i] += v; }));
+    chart.innerHTML = flowChartSVG(sDn, sUp, sTn);
+    const sec = f.interval >= 1.5 ? f.interval + ' 秒' : '1 秒';
+    leg.innerHTML =
+      '<span><i style="background:var(--cyan)"></i>下行总吞吐（含隧道）</span>'
+      + '<span><i style="background:var(--purple)"></i>上行总吞吐</span>'
+      + (sTn.some(v => v > 500)
+        ? '<span><i style="background:var(--red)"></i>其中隧道下行</span>' : '')
+      + '<span>横轴 = 最近 ' + n + ' 个采样点，每格 ' + sec + '</span>';
+  } else {
+    chart.innerHTML = '<div class="empty" style="padding:14px 12px">正在取第一个采样点 —— '
+      + '速率要靠两次采样的差值才能算出来，等 1 秒就好。</div>';
+    leg.innerHTML = '';
+  }
+
+  const ownerMap = {};
+  ((scan && scan.interfaces) || []).forEach(i => { ownerMap[i.name] = i.owner; });
+  const order = { '隧道': 0, '物理': 1, '其他': 2, '系统虚拟': 3 };
+  const rank = k => (order[k] === undefined ? 9 : order[k]);
+  rows.sort((a, b) => (rank(a.kind) - rank(b.kind)) || ((b.down + b.up) - (a.down + a.up)));
+
+  tbl.innerHTML = rows.length
+    ? '<div class="tbl-wrap"><table><thead><tr><th>接口</th><th>类型</th><th>归属</th>'
+      + '<th>下行</th><th>上行</th><th>近 ' + esc(f.window) + ' 点</th></tr></thead><tbody>'
+      + rows.map(r => {
+          const [a1, u1] = rateParts(r.down), [a2, u2] = rateParts(r.up);
+          return `<tr><td class="mono">${esc(r.name)}</td>`
+            + `<td>${kindTag(r.kind)}</td>`
+            + `<td class="ns">${esc(ownerMap[r.name] || '—')}</td>`
+            + `<td class="mono">${esc(a1)} <span class="ns tone-dim">${esc(u1)}</span></td>`
+            + `<td class="mono">${esc(a2)} <span class="ns tone-dim">${esc(u2)}</span></td>`
+            + `<td>${sparkSVG(r.hist_down, 'var(--cyan)')}</td></tr>`;
+        }).join('')
+      + '</tbody></table></div>'
+      + '<div class="ns tone-dim" style="margin-top:7px">不含回环（lo0）。'
+      + '最后一列是该接口<b>下行速率</b>的迷你曲线，最高点 = 这段窗口里的峰值。</div>'
+    : '<div class="empty">' + esc(f.note || '最近 60 秒所有接口都是零流量。') + '</div>';
+
+  if (meta) {
+    meta.textContent = (f.interval >= 1.5 ? '每 ' + f.interval + ' 秒采样' : '每秒采样')
+      + ' · ' + f.samples + '/' + f.window + ' 点'
+      + (f.age != null && f.age > 6 ? ' · 数据 ' + Math.round(f.age) + ' 秒前' : '');
+  }
+}
+
+async function pollFlow() {
+  try {
+    renderFlow(await (await fetch('/api/flow')).json());
+  } catch (e) {
+    const meta = $('flowMeta');
+    if (meta) meta.textContent = '取数失败';
+  }
+}
+
+function startFlow() {
+  if (flowPaused || flowTimer) return;
+  pollFlow();
+  flowTimer = setInterval(pollFlow, 1000);
+  const b = $('btnFlowToggle');
+  if (b && !flowPaused) b.textContent = '⏸ 暂停';
+}
+
+function stopFlow() {
+  if (flowTimer) { clearInterval(flowTimer); flowTimer = null; }
+  const b = $('btnFlowToggle');
+  if (b && !flowPaused) b.textContent = '▶ 继续';
+}
+
+/* 只在卡片可见时轮询：省 CPU，也让后端采样线程能自己闲下来 */
+(function initFlow() {
+  const sec = document.getElementById('s-flow');
+  if (!sec) return;
+  const btn = $('btnFlowToggle');
+  if (btn) btn.onclick = () => {
+    flowPaused = !flowPaused;
+    btn.textContent = flowPaused ? '▶ 继续' : '⏸ 暂停';
+    if (flowPaused) { if (flowTimer) { clearInterval(flowTimer); flowTimer = null; } }
+    else startFlow();
+  };
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(es => {
+      es.forEach(e => { if (e.isIntersecting) startFlow(); else stopFlow(); });
+    }, { rootMargin: '180px' }).observe(sec);
+  } else {
+    startFlow();
+  }
+})();
 
 /* ── 事件绑定 ── */
 const steamOverviewBtn = $('btnSteamOverview');

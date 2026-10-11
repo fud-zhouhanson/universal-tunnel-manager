@@ -91,6 +91,11 @@ if grep -q "八·八、Steam 体检" "$APP" 2>/dev/null; then
 else
   echo "  Steam 体检模块：缺失 —— 这是旧版，请在项目目录执行 bash dist/install.sh"
 fi
+if grep -q "/api/flow" "$APP" 2>/dev/null; then
+  echo "  实时流速模块：已包含 ✓"
+else
+  echo "  实时流速模块：缺失 —— 这是旧版，请在项目目录执行 bash dist/install.sh"
+fi
 echo "  注：若 7531 已被别的实例占用，服务会顺延到 7532/7533 —— 以本窗口输出的网址为准。"
 echo "------------------------------------------------------------"
 "$PY" "$APP"

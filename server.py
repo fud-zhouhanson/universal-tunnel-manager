@@ -268,9 +268,10 @@ TUNNEL_KNOWLEDGE = [
 TUNNEL_IFACE_RE = re.compile(
     r"^(utun|feth|tap|tun|ppp|ipsec|wg|ham|zt|vpn|cscotun)",
     re.I)
-# 物理网卡命名规律
+# 物理网卡命名规律（前半段是 macOS/Linux 的口径，后半段是 Windows 的网卡描述）
 PHYS_IFACE_RE = re.compile(
-    r"^(en\d|eth\d|wlan|wi-fi|以太网|本地连接|wlp\d|wl\d|enp\d|Ethernet)", re.I)
+    r"^(en\d|eth\d|wlan|wi-fi|wifi|wireless|以太网|本地连接|wlp\d|wl\d|enp\d|"
+    r"Ethernet|Intel\(R\)|Realtek|Broadcom|Qualcomm)", re.I)
 # macOS 系统自带虚拟接口（非业务隧道）
 SYSTEM_IFACE_RE = re.compile(r"^(gif|stf|bridge|awdl|llw|anpi|ap\d|nan\d)", re.I)
 
@@ -373,9 +374,13 @@ def run_elevated_win(cmd_str):
     if os.path.exists(out_tmp):
         os.remove(out_tmp)
     ps_script = (
-        f"$ErrorActionPreference='Continue'\n"
+        "$ErrorActionPreference='Continue'\n"
         f"{cmd_str} *>&1 | Out-File -FilePath '{out_tmp}' -Encoding UTF8\n"
-        f"\"RC:$LASTEXITCODE\" | Out-File -FilePath '{out_tmp}' "
+        # PowerShell 的 cmdlet **不设置** $LASTEXITCODE（只有外部 exe 才会），
+        # 所以直接写 \"RC:$LASTEXITCODE\" 可能变成光秃秃的 \"RC:\"，下面那句正则
+        # 永远匹配不上 → 一直等到 90 秒超时。给个确定的数值兜底。
+        "$__rc = if ($null -eq $LASTEXITCODE) { -1 } else { $LASTEXITCODE }\n"
+        f"\"RC:$__rc\" | Out-File -FilePath '{out_tmp}' "
         f"-Append -Encoding UTF8\n"
     )
     ps_file = os.path.join(tempfile.gettempdir(),
@@ -441,6 +446,8 @@ def list_processes():
             out = out2 if rc2 == 0 else ""
         return out.lower()
     if IS_WIN:
+        if not ps_available()[0]:
+            return _nat_processes()          # tasklist /fo csv
         rc, out, _ = run_ps(
             "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
             "Get-Process | Select-Object -ExpandProperty Name"
@@ -469,12 +476,39 @@ def is_tunnel_iface(name, desc=""):
     blob = (name + " " + desc).lower()
     if TUNNEL_IFACE_RE.match(name):
         return True
+    # ⚠️ Windows 的隧道网卡**名字不叫 utunN**，而是厂商描述，例如
+    #    「Sangfor SSL VPN CS Support System VNIC」（aTrust 就是这个）。
+    #    不认出来它就会被当成物理网卡 —— 整个「物理 vs 隧道」的判断都会反过来。
     return any(k in blob for k in ("tap-", "tun-", "virtual adapter",
-                                   "virtual ethernet", "虚拟网卡"))
+                                   "virtual ethernet", "虚拟网卡",
+                                   "vnic", "ssl vpn", "vpn adapter",
+                                   "sangfor", "深信服", "easyconnect",
+                                   "anyconnect", "openvpn", "wireguard",
+                                   "forticlient", "secoclient", "pangolin"))
 
 
 def is_phys_iface(name, desc=""):
     return bool(PHYS_IFACE_RE.match(name))
+
+
+def is_loopback_iface(*names):
+    """回环接口（lo0 / Loopback Pseudo-Interface 1 / 回环）。
+
+    独立成一个判定是必要的：Windows 原生解析会拿到回环口，
+    而它带 127.0.0.1、类型也像「有 IP 的以太网口」，
+    不排掉就会被当成「物理网卡」——那会导致整份判断都错。
+    """
+    for n in names:
+        b = (n or "").strip().lower()
+        if not b:
+            continue
+        # ⚠️ 别用 startswith("lo") —— Windows 上常有叫
+        #    「Local Area Connection」的**物理**网卡，会被误杀。
+        if re.fullmatch(r"lo\d*", b) or b in ("loopback", "回环"):
+            return True
+        if "loopback" in b or "回环" in b or "pseudo-interface" in b:
+            return True
+    return False
 
 
 def is_system_iface(name):
@@ -540,6 +574,15 @@ def scan_interfaces_mac():
 
 
 def scan_interfaces_win():
+    """接口列表：优先 PowerShell（信息最全），被策略拦住时退回原生命令解析。"""
+    if ps_available()[0]:
+        got = _scan_interfaces_win_ps()
+        if got:
+            return got
+    return _nat_interfaces()
+
+
+def _scan_interfaces_win_ps():
     rc, out, err = run_ps(
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "$a=Get-NetAdapter | Select Name,InterfaceDescription,InterfaceType,"
@@ -627,6 +670,13 @@ def probe_egress_mac():
 
 
 def win_snapshot():
+    """默认路由快照：优先 PowerShell，被拦住时退回 `route print` 解析。"""
+    if not ps_available()[0]:
+        return _nat_snapshot()
+    return _win_snapshot_ps()
+
+
+def _win_snapshot_ps():
     rc, out, _ = run_ps(
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "try { [PSCustomObject]@{"
@@ -653,9 +703,35 @@ def default_route_win(snap):
     return "", ""
 
 
+def default_route():
+    """当前默认路由 (接口, 网关) —— 跨平台。"""
+    if IS_WIN:
+        return default_route_win(win_snapshot())
+    return default_route_mac()
+
+
+def phys_gateway(iface):
+    """物理网卡的网关 —— 跨平台。"""
+    if IS_WIN:
+        for r in (win_snapshot().get("routes") or []):
+            if r.get("InterfaceAlias") == iface and r.get("NextHop"):
+                return r.get("NextHop", "")
+        return ""
+    return phys_gateway_mac(iface)
+
+
+def iface_of_ip(ip):
+    """某个目标 IP 按路由表会从哪个接口出去 —— 跨平台。"""
+    if IS_WIN:
+        return (iface_of_win_batch([ip]) or {}).get(ip, "") or ""
+    return iface_of_mac(ip)
+
+
 def iface_of_win_batch(ips):
     if not ips:
         return {}
+    if not ps_available()[0]:
+        return _nat_iface_of_batch(ips)     # 自家长前缀匹配，无本地化风险
     ip_list = ",".join(f"'{i}'" for i in ips)
     rc, out, _ = run_ps(
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
@@ -751,15 +827,43 @@ def resolve_a(domain):
 #   · 最近 AUTO_WINDOW 秒内访问过的新域名 → 自动加入「目标域名」
 #   · 超过 AUTO_EXPIRE 秒没再访问的自动域名 → 自动移除
 #   实测 Chrome / Edge / Firefox / Safari 的历史库都能读到，Safari 需要完全磁盘访问权限。
+#
+# ⚠️ 三条踩过的坑，别改回去：
+#
+#  1) **不要剥掉 `www.`**（曾这么干过，是错的）。
+#     实测国内站的 apex 与 www 解析出来的公网 IP **零交集**：
+#       www.baidu.com → 180.101.51.73      baidu.com → 111.63.65.103
+#       www.zhihu.com → 43.242.197.211     zhihu.com → 182.61.194.9
+#       www.bilibili.com → 114.230.222.139 bilibili.com → 119.3.70.188  …共 6 个站全部 0 交集
+#     只有 github.com 这种本来就无 www 的才对得上。
+#     浏览器连的是 **www 的 IP**；存成 apex 就会给一批用不上的 IP 加直连路由，
+#     「追踪 → 应用」整条链路看着成功、实际一条都没生效。原样保留 host 最准。
+#
+#  2) **读取失败绝不能吞**。macOS 上 Safari 的历史库受 TCC（完全磁盘访问）保护，
+#     直读报 `unable to open database file`、先复制再读报 `EPERM`。
+#     以前是 `except: pass`，界面于是永远显示「追踪中 · 0 个」，
+#     用户分不清「没开浏览器」/「没授权」/「刚开过但都超了 3 分钟」。
+#     现在每次扫描都留一份 _auto_status，经 /api/scan 送到前端展示。
+#
+#  3) **临时文件要放在 finally 里删**。Chrome 的库要先复制再读（运行时被锁），
+#     复制失败时如果 unlink 不在 finally，副本会永远留下 —— 每 30 秒一轮、失败一次留一个。
 
 AUTO_WINDOW = 180    # 最近 3 分钟内访问过 = 「正在看」
 AUTO_EXPIRE = 600    # 10 分钟没再看 = 「关了」，移除
 AUTO_INTERVAL = 30   # 扫描周期
+AUTO_MAX = 60        # 追踪集合的上限（防「浏览一天 → 上百条路由」失控），超出丢最旧的。
+                     # 为什么不是 100：追踪到的域名现在**真的会变成直连路由**，
+                     # 每个域名解析出 2~4 个 IP，而 Windows 上每条 IP 要起两次 route.exe
+                     # （先 delete 再 -p add），100 个域名 ≈ 800 次进程创建，
+                     # 逼近 run_elevated_win 的 90 秒超时。60 个留足余量。
 
 _auto_domains = {}          # {domain: last_seen_timestamp}
 _auto_lock = threading.Lock()
 _auto_thread = None
 _auto_enabled = True        # 前端可开关
+# 最近一次扫描的实况：给界面回答「为什么这里是空的」
+_auto_status = {"at": 0.0, "found": 0, "tracked": 0, "sources": [], "error": ""}
+
 
 
 def _chrome_history_paths():
@@ -771,9 +875,16 @@ def _chrome_history_paths():
         os.path.join(home, "Library/Application Support/BraveSoftware/Brave-Browser"),
         os.path.join(home, ".config/google-chrome"),
         os.path.join(home, ".config/microsoft-edge"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google/Chrome/User Data"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft/Edge/User Data"),
     ]
+    # ⚠️ 必须先判空再拼。os.path.join("", "Google/Chrome/User Data") 得到的是
+    #    **相对路径** `Google/Chrome/User Data` —— 在 macOS / Linux 上 LOCALAPPDATA
+    #    必然为空，这条相对路径会跟着进程 cwd 跑，属于「碰巧才可能命中」的隐患。
+    la = os.environ.get("LOCALAPPDATA") or ""
+    if la:
+        bases += [
+            os.path.join(la, "Google", "Chrome", "User Data"),
+            os.path.join(la, "Microsoft", "Edge", "User Data"),
+        ]
     paths = []
     for b in bases:
         try:
@@ -787,6 +898,30 @@ def _chrome_history_paths():
         except OSError:
             continue
     return paths
+
+
+def _short_path(path):
+    """把家目录缩成 ~，免得状态提示里塞一条又长又私的绝对路径。"""
+    try:
+        home = os.path.expanduser("~")
+        if path.startswith(home):
+            return "~" + path[len(home):]
+    except Exception:  # noqa: BLE001
+        pass
+    return path
+
+
+def _browser_of(path):
+    """从历史库路径反推浏览器名 —— 只用于给人看的状态提示。"""
+    low = path.lower()
+    for key, name in (("microsoft/edge", "Edge"), ("microsoft\\edge", "Edge"),
+                      ("chrome", "Chrome"), ("brave", "Brave"),
+                      ("firefox", "Firefox"), ("mozilla", "Firefox"),
+                      ("safari", "Safari")):
+        if key in low:
+            return name
+    return "浏览器"
+
 
 
 def _firefox_history_paths():
@@ -809,29 +944,60 @@ def _safari_history_path():
 
 
 def _extract_domain(url):
-    """从 URL 提取主域名：去 scheme/path，去掉 www. 前缀。"""
+    """从 URL 提取主机名：去 scheme / userinfo / path / query / port，**保留子域**。
+
+    ⚠️ 特意**不剥 `www.`**（曾经剥过，是错的，见本节的坑 1）：
+    国内站的 apex 与 www 解析出来的 IP 零交集，剥掉就会给错的 IP 加路由。
+    我们要的就是「浏览器实际连的那个主机名」。
+    """
     if not url:
         return None
-    m = re.match(r"^[a-zA-Z]+://", url)
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", url)
     rest = url[m.end():] if m else url
-    host = rest.split("/")[0].split("?")[0].split(":")[0]
+    host = rest.split("/")[0].split("?")[0].split("#")[0]
+    host = host.split("@")[-1]          # 去掉 user:pass@
+    host = re.sub(r":\d+$", "", host)   # 去掉端口
     host = host.lower().strip(".")
-    if not host or not "." in host:
+    if not host or "." not in host:
         return None
     if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):  # 裸 IP 不要
         return None
-    if host.endswith((".local", ".internal", ".localhost")):
+    if host.endswith((".local", ".internal", ".localhost", ".in-addr.arpa")):
         return None
-    if host.startswith("www."):
-        host = host[4:]
     return host
 
 
+def _classify_read_error(exc):
+    """把「读历史库失败」归类成人能看懂的原因。
+
+    macOS 的 TCC（完全磁盘访问）保护有两种脸色：
+      · 直接 open → sqlite3.OperationalError: unable to open database file
+      · 先复制再读 → PermissionError / OSError EPERM
+    两种都归到 denied，前端据此提示去开权限。
+    """
+    import errno as _errno
+    if isinstance(exc, PermissionError):
+        return "denied"
+    if getattr(exc, "errno", None) in (_errno.EACCES, _errno.EPERM):
+        return "denied"
+    if isinstance(exc, sqlite3.Error) and "unable to open" in str(exc).lower():
+        return "denied"
+    return "error"
+
+
+
 def _scan_history_once():
-    """扫一遍所有浏览器历史库，返回 {domain: last_visit_timestamp}。"""
-    import sqlite3
+    """扫一遍所有浏览器历史库。
+
+    返回 (found, sources)：
+      found   = {domain: last_visit_timestamp}
+      sources = [{"kind", "path", "state", "n", "msg"}]，state ∈ ok / denied / error
+
+    sources 是给界面用的 —— 「为什么追踪列表是空的」必须能回答出来。
+    """
     now = time.time()
     found = {}
+    sources = []
 
     def merge(dom, ts):
         if dom and ts:
@@ -839,34 +1005,48 @@ def _scan_history_once():
             if ts > prev:
                 found[dom] = ts
 
-    # Chrome / Edge / Brave：last_visit_time 是 1601 起的微秒
+    def note(kind, path, state, n=0, msg=""):
+        sources.append({"kind": kind,
+                        "path": _short_path(path),
+                        "state": state, "n": n, "msg": str(msg)[:160]})
+
+    # ---- Chrome / Edge / Brave：last_visit_time 是 1601 起的微秒 ----
     EPOCH_1601 = 11644473600
     for p in _chrome_history_paths():
+        kind = _browser_of(p)
+        tmp = None
         try:
-            tmp = None
-            # Chrome 运行时库被锁，复制一份再读
-            import tempfile as _tf
-            tmp = _tf.NamedTemporaryFile(suffix=".db", delete=False)
+            # Chrome 运行时库被锁，先复制一份再读
+            tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
             tmp.close()
-            shutil_copy = None
-            import shutil as _sh
-            _sh.copyfile(p, tmp.name)
+            shutil.copyfile(p, tmp.name)
+            n = 0
             con = sqlite3.connect(f"file:{tmp.name}?mode=ro", uri=True)
             try:
                 for url, t in con.execute(
                         "SELECT url, last_visit_time FROM urls "
                         "ORDER BY last_visit_time DESC LIMIT 200"):
-                    ts = t / 1_000_000 - EPOCH_1601 if t else 0
-                    merge(_extract_domain(url), ts)
+                    merge(_extract_domain(url),
+                          t / 1_000_000 - EPOCH_1601 if t else 0)
+                    n += 1
             finally:
                 con.close()
-                os.unlink(tmp.name)
-        except (OSError, sqlite3.Error):
-            pass
+            note(kind, p, "ok", n)
+        except (OSError, sqlite3.Error) as e:
+            note(kind, p, _classify_read_error(e), 0, e)
+        finally:
+            # ⚠️ 必须在 finally 里删。以前 unlink 写在 con.close() 之后，
+            #    copyfile 一失败就直接跳走 → 副本永远留下（每 30 秒一个）。
+            if tmp is not None:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
 
-    # Firefox：visit_date 是 1970 起的微秒
+    # ---- Firefox：visit_date 是 1970 起的微秒 ----
     for p in _firefox_history_paths():
         try:
+            n = 0
             con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
             try:
                 for url, t in con.execute(
@@ -874,15 +1054,18 @@ def _scan_history_once():
                         "WHERE moz_places.id = moz_historyvisits.place_id "
                         "ORDER BY visit_date DESC LIMIT 200"):
                     merge(_extract_domain(url), (t or 0) / 1_000_000)
+                    n += 1
             finally:
                 con.close()
-        except (OSError, sqlite3.Error):
-            pass
+            note("Firefox", p, "ok", n)
+        except (OSError, sqlite3.Error) as e:
+            note("Firefox", p, _classify_read_error(e), 0, e)
 
-    # Safari：visit_time 是 2001 起的秒（Cocoa epoch）
+    # ---- Safari：visit_time 是 2001 起的秒（Cocoa epoch）----
     p = _safari_history_path()
     if p:
         try:
+            n = 0
             con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
             try:
                 for url, t in con.execute(
@@ -890,21 +1073,24 @@ def _scan_history_once():
                         "WHERE history_items.id = history_visits.history_item "
                         "ORDER BY visit_time DESC LIMIT 200"):
                     merge(_extract_domain(url), (t or 0) + 978307200)
+                    n += 1
             finally:
                 con.close()
-        except (OSError, sqlite3.Error):
-            pass
+            note("Safari", p, "ok", n)
+        except (OSError, sqlite3.Error) as e:
+            note("Safari", p, _classify_read_error(e), 0, e)
 
-    return {d: t for d, t in found.items() if t > 0}
+    return {d: t for d, t in found.items() if t > 0}, sources
 
 
 def auto_domains_loop():
     """后台循环：把最近访问的新域名纳入追踪，过期的移除。"""
+    global _auto_status
     while True:
         try:
             if _auto_enabled:
                 now = time.time()
-                fresh = _scan_history_once()
+                fresh, sources = _scan_history_once()
                 with _auto_lock:
                     # 新访问的：在窗口期内
                     for dom, ts in fresh.items():
@@ -915,8 +1101,28 @@ def auto_domains_loop():
                                if now - ts > AUTO_EXPIRE]
                     for d in expired:
                         _auto_domains.pop(d, None)
-        except Exception:  # noqa: BLE001
-            pass
+                    # 上限保护：浏览一整天会攒出上百个域名，
+                    # 它们最终都会变成直连路由 —— 丢最旧的，留住「最近在看的」。
+                    if len(_auto_domains) > AUTO_MAX:
+                        drop = sorted(_auto_domains.items(),
+                                      key=lambda kv: kv[1])[
+                                          :len(_auto_domains) - AUTO_MAX]
+                        for d, _ in drop:
+                            _auto_domains.pop(d, None)
+                    _auto_status = {
+                        "at": now,
+                        "found": len(fresh),
+                        "tracked": len(_auto_domains),
+                        "sources": sources,
+                        "error": "",
+                    }
+        except Exception as e:  # noqa: BLE001
+            # 循环本身崩了也要让界面知道，否则又会回到「静默为空」
+            with _auto_lock:
+                _auto_status = {"at": time.time(), "found": 0,
+                                "tracked": len(_auto_domains),
+                                "sources": [],
+                                "error": "%s: %s" % (type(e).__name__, e)}
         time.sleep(AUTO_INTERVAL)
 
 
@@ -936,9 +1142,19 @@ def get_auto_domains():
                                      key=lambda kv: -kv[1])]
 
 
+def get_auto_status():
+    """返回最近一次扫描的实况 —— 界面靠它回答「为什么追踪列表是空的」。"""
+    with _auto_lock:
+        return dict(_auto_status)
+
+
 def toggle_auto_tracker(enabled):
-    global _auto_enabled
+    global _auto_enabled, _auto_status
     _auto_enabled = bool(enabled)
+    if not _auto_enabled:
+        with _auto_lock:
+            _auto_status = {"at": time.time(), "found": 0, "tracked": 0,
+                            "sources": [], "error": ""}
 
 
 def auto_tracker_enabled():
@@ -1203,6 +1419,9 @@ def _sh(cmd, timeout=20):
 
 
 def active_ifaces():
+    """本机当前存在的网络接口名集合（跨平台）。"""
+    if IS_WIN:
+        return {i["name"] for i in scan_interfaces_win() if i.get("name")}
     return set(_sh("ifconfig -l").split())
 
 
@@ -1253,8 +1472,43 @@ def _del_route_cmd(dest):
     return f"route -n delete -host {dest}"
 
 
+def _win_clean_residual_routes():
+    """Windows：删掉「所在接口已经不存在」的 IPv4 路由。
+
+    与 macOS 同口径 —— 只动「指向不存在接口」的条目，**绝不碰默认路由**，
+    也不碰任何还活着的接口上的路由。
+    """
+    valid = active_ifaces()
+    stale = []
+    for dest, alias in _routes_snapshot():
+        if dest == "default":
+            continue                       # 默认路由永远不动
+        if alias and alias not in valid:
+            stale.append(dest)
+    stale = sorted(set(stale), key=lambda d: -len(d))
+    if not stale:
+        return 0, "无残留路由"
+
+    lines = ["$ok=$true"]
+    for d in stale:
+        s = str(d).replace("'", "''")
+        lines.append("try { Remove-NetRoute -DestinationPrefix '%s' "
+                     "-Confirm:$false -ErrorAction Stop } catch { $ok=$false; "
+                     "Write-Output ('ERR %s: ' + $_.Exception.Message) }" % (s, s))
+    lines.append("if ($ok) { Write-Output '__TM_OK__' } "
+                 "else { Write-Output '__TM_FAIL__' }")
+    ok, text, cancelled = _win_elevated(lines, _cmd_remove_routes(stale))
+    if cancelled:
+        return 0, "NEED_ADMIN"
+    if not ok:
+        return 0, "清理未完全成功：%s" % (text[:160] or "未知原因")
+    return len(stale), "已清理 %d 条（%s）" % (len(stale), ", ".join(stale[:6]))
+
+
 def clean_residual_routes(pw=None):
     """删掉指向「已不存在的接口」的路由。返回 (条数, 说明)。"""
+    if IS_WIN:
+        return _win_clean_residual_routes()
     if not IS_MAC:
         return 0, "仅 macOS 支持"
     valid = active_ifaces()
@@ -1276,13 +1530,53 @@ def clean_residual_routes(pw=None):
     return len(stale), f"已清理 {len(stale)} 条（{', '.join(stale[:6])}）"
 
 
+def _atrust_entry():
+    for k in TUNNEL_KNOWLEDGE:
+        if k.get("name", "").lower().startswith("atrust"):
+            return k
+    return None
+
+
+def _win_do_scene(target, pw=None):
+    """Windows 上的情景切换 —— 复用「出口切换」那条路径，不另起一套。
+
+    情景在这边其实就是「选一个出口」：
+      campus → 切到 aTrust（它的 Windows 服务由出口层负责启停）
+      game   → 切到「物理直连」（顺带停掉所有在用的隧道），
+               再让用户在加速器界面点「开始加速」
+               —— Windows 版加速器和 macOS 一样，开关只在 GUI 里
+    """
+    if target not in ("game", "campus"):
+        return {"ok": False, "target": target, "done": [], "manual": [],
+                "message": f"未知情景：{target}"}
+
+    if target == "campus":
+        key = next((o["key"] for o in discover_outlets()
+                    if o["key"] != DIRECT_OUTLET
+                    and o["key"].lower().startswith("atrust")), None)
+        if not key:
+            return {"ok": False, "target": target, "done": [], "manual": [],
+                    "message": "没有发现 aTrust 这个出口（本机可能没装）"}
+        r = switch_outlet(key, pw)
+        r["target"] = target
+        return r
+
+    r = switch_outlet(DIRECT_OUTLET, pw)
+    r["target"] = target
+    r["manual"] = (["在加速器里点「开始加速」—— Windows 版的加速开关同样只在它自己的界面里"]
+                   + (r.get("manual") or []))
+    return r
+
+
 def do_scene(target, pw=None):
     """执行情景切换里「可自动」的部分。
     返回 {ok, target, done, manual, message}；不需要的步骤不会出现。
     """
+    if IS_WIN:
+        return _win_do_scene(target, pw)
     if not IS_MAC:
         return {"ok": False, "target": target, "done": [], "manual": [],
-                "message": "情景切换当前仅支持 macOS"}
+                "message": f"情景切换当前仅支持 Windows / macOS"}
     if target not in ("game", "campus"):
         return {"ok": False, "target": target, "done": [], "manual": [],
                 "message": f"未知情景：{target}"}
@@ -1354,6 +1648,23 @@ def do_scene(target, pw=None):
 # 雷神 / 网易UU → 只有 app(1)，但加速开关在 App 内部 ⇒ 实际是 manual。
 
 DIRECT_OUTLET = "__direct__"
+VPN_PREFIX = "__vpn__:"            # Windows 自带 VPN 的出口键前缀（见 discover_outlets）
+# 「缺权限」的两个哨兵：macOS 是 sudo 密码，Windows 是 UAC 授权 ——
+# 前端提示语完全不同（Windows 上没有密码可输），所以必须分开传。
+PRIV_MSGS = ("NEED_SUDO", "NEED_ADMIN")
+
+
+def priv_error(message=""):
+    """「缺权限」回给前端的错误体。
+
+    macOS 要用户输 sudo 密码，Windows 只要点一下 UAC —— 提示语完全不同，
+    所以错误码也分开，前端才不会在 Windows 上弹一个没用的密码框。
+    """
+    if IS_WIN:
+        return {"ok": False, "error": "NEED_ADMIN",
+                "message": message or "需要管理员授权（会弹出 UAC 确认框）"}
+    return {"ok": False, "error": "NEED_SUDO",
+            "message": message or "需要管理员密码"}
 
 # 「关闭方式」显式表 —— 只给少数需要特判的客户端配，其余走自动探测。
 #
@@ -1466,6 +1777,850 @@ def _find_launchd(keywords):
     return daemons, agents
 
 
+# ---- Windows 侧的三个「可控点」探测 ----
+#
+# 与 macOS 一一对应，缺一不可：
+#   应用     ←→ /Applications 里的 .app
+#   服务     ←→ launchd 作业（Windows 的等价物就是 SCM 服务）
+#   系统 VPN ←→ scutil --nc（Windows 用 Get-VpnConnection + rasdial）
+#
+# ⚠️ 全部**只读**，探测失败一律返回空 → 上层退化成「需要手动」。
+# 宁可显示「手动」，也不猜一个服务名去停 —— 停错服务比不做事危险得多。
+# ⚠️ 本机是 macOS，这段**没有真机验证过**，见 README「Windows 未验证」一节。
+
+_WIN_CACHE_LOCK = threading.Lock()
+_WIN_CACHE = {"apps": (0.0, []), "svcs": (0.0, [])}
+
+
+def _win_cached(slot, ttl, loader):
+    """注册表/服务枚举各要 1 秒上下，加个短缓存免得每次扫描都重来。"""
+    now = time.time()
+    with _WIN_CACHE_LOCK:
+        at, val = _WIN_CACHE.get(slot) or (0.0, [])
+    if val and now - at < ttl:
+        return val
+    val = loader() or []
+    if val:
+        with _WIN_CACHE_LOCK:
+            _WIN_CACHE[slot] = (now, val)
+    return val
+
+
+# ======================================================================
+# 四.9 Windows 原生回退层（不依赖 PowerShell）
+# ======================================================================
+# 背景（2026-10-11 真机报告）：有一台 Windows 11 上 powershell.exe 被管理员
+#   策略拦死 —— subprocess 直接抛
+#     OSError [WinError 786] 管理员用策略规则限制了对 powershell.exe 的访问
+#   而 System32 里的原生命令（route / ipconfig / arp / sc / tasklist / netsh）
+#   全部正常。此时若仍只认 PowerShell，程序就「不崩溃但全瞎」：
+#   网卡 0 个、隧道 0 个、出口只剩「物理直连」、域名走向全未知。
+#
+# 所以这一层**全部只吃原生命令**，并且尽量挑不受系统语言影响的部分：
+#   route print -4    接口列表 = 序号 + 点 + 名字（中英文行格式一致）；路由表是纯数字
+#   arp -a            「192.168.1.5 --- 0x5」这个模式中英文完全一致
+#   netsh interface   给出「序号 ↔ 友好名 ↔ IP/网关/跃点」的对应关系
+#   sc query          字段名恒为英文（SERVICE_NAME / DISPLAY_NAME / STATE）
+#   tasklist /fo csv  列是 CSV，镜像名恒为 ASCII
+#   winreg            标准库直读注册表，比 reg query 稳
+#   rasphone.pbk      系统 VPN 就是个 INI 文件，读文件即可
+#
+# ⚠️ 与 PowerShell 那层一样，本层**没有真机验证过**（本机是 macOS）。
+#    自检脚本专门有一段把这些命令的原始输出打出来，按真机回传收紧解析。
+
+_PS_LOCK = threading.Lock()
+_PS_STATE = {"ok": None, "err": "", "at": 0.0}
+_PS_TTL = 300.0              # PowerShell 可用性缓存 5 分钟
+
+_NAT_LOCK = threading.Lock()
+_NAT_CACHE = {}              # {名字: (时刻, 值)} —— 同一次扫描里别反复起进程
+_NAT_TTL = 3.0
+
+
+def ps_available(force=False):
+    """PowerShell 能不能用 → (bool, 错误文本)。结果缓存 5 分钟。
+
+    先探一次再决定走哪条路：否则每次调用都要白挨一次 `[WinError 786]`，
+    而且 PowerShell 失败时往往还要等超时才返回。
+    """
+    if not IS_WIN:
+        return False, "非 Windows"
+    now = time.time()
+    with _PS_LOCK:
+        if not force and _PS_STATE["ok"] is not None \
+                and now - _PS_STATE["at"] < _PS_TTL:
+            return _PS_STATE["ok"], _PS_STATE["err"]
+    rc, out, err = run(["powershell.exe", "-NoProfile", "-NonInteractive",
+                        "-Command", "'__TM_PS_OK__'"], timeout=20)
+    ok = rc == 0 and "__TM_PS_OK__" in (out or "")
+    msg = "" if ok else (err or out or "无输出").strip()[:400]
+    with _PS_LOCK:
+        _PS_STATE.update({"ok": ok, "err": msg, "at": now})
+    if not ok:
+        print("[*] PowerShell 不可用，改用原生命令解析：%s" % msg)
+    return ok, msg
+
+
+def _nat_cached(name, loader, ttl=None):
+    """原生解析的短缓存（默认 3 秒）—— 一次扫描里好几个地方都要路由表。"""
+    ttl = _NAT_TTL if ttl is None else ttl
+    now = time.time()
+    with _NAT_LOCK:
+        hit = _NAT_CACHE.get(name)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    val = loader()
+    with _NAT_LOCK:
+        _NAT_CACHE[name] = (now, val)
+    return val
+
+
+def _ip_int(s):
+    """'192.168.1.1' → 整数；不是合法 IPv4 返回 None。"""
+    if not isinstance(s, str):
+        return None
+    parts = s.strip().split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if any(n < 0 or n > 255 for n in nums):
+        return None
+    return (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
+
+
+def _mask_len(mask_int):
+    """255.255.255.0 → 24。"""
+    n = 0
+    for i in range(31, -1, -1):
+        if mask_int & (1 << i):
+            n += 1
+        else:
+            break
+    return n
+
+
+def _mask_from_len(n):
+    """24 → 255.255.255.0；越界返回 None。"""
+    if not isinstance(n, int) or n < 0 or n > 32:
+        return None
+    v = (0xFFFFFFFF << (32 - n)) & 0xFFFFFFFF if n else 0
+    return "%d.%d.%d.%d" % ((v >> 24) & 255, (v >> 16) & 255,
+                            (v >> 8) & 255, v & 255)
+
+
+_RE_ROUTE_ROW = re.compile(
+    r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+"      # 目标网络
+    r"(\d{1,3}(?:\.\d{1,3}){3})\s+"          # 掩码
+    r"(\S+)\s+"                              # 网关（可能是「在链路上」On-link）
+    r"(\d{1,3}(?:\.\d{1,3}){3})\s+"          # 接口自身 IP
+    r"(\d+)\s*$")                            # 跃点
+
+
+def _nat_route_print():
+    """解析 `route print -4` → {"ifaces": {序号: {...}}, "routes": [...]}。
+
+    只认结构不认词：接口列表行是「序号 + 点 + [MAC + 点] + 名字」，
+    路由表行是 5 列地址/数字。这两处在中英文 Windows 上完全一样。
+    """
+    def _load():
+        rc, out, _ = run(["route", "print", "-4"], timeout=25)
+        if rc != 0 or not out:
+            rc, out, _ = run(["route", "print"], timeout=25)
+        if rc != 0 or not out:
+            return {"ifaces": {}, "routes": []}
+        ifaces, routes = {}, []
+        for line in out.splitlines():
+            m = _RE_ROUTE_ROW.match(line)
+            if m:
+                dest, mask, gw, ip, metric = m.groups()
+                routes.append({"dest": dest, "mask": mask, "gw": gw,
+                               "ip": ip, "metric": int(metric)})
+                continue
+            m = re.match(r"^\s*(\d{1,4})\.{3,}(.*)$", line)
+            if not m:
+                continue
+            idx, rest = int(m.group(1)), m.group(2).strip()
+            m2 = re.match(r"^(?:[0-9a-fA-F]{2}(?:\s+[0-9a-fA-F]{2})+)[\s.]*(.*)$",
+                          rest)
+            name = (m2.group(1) if m2 else rest.lstrip(".")).strip()
+            # 名字里必须有字母/汉字，免得把别的东西误认成接口
+            if name and re.search(r"[A-Za-z\u4e00-\u9fff]", name):
+                ifaces.setdefault(idx, {"index": idx, "name": name})
+        return {"ifaces": ifaces, "routes": routes}
+    return _nat_cached("route_print", _load)
+
+
+def _nat_arp_map():
+    """`arp -a` 里「接口: 192.168.1.5 --- 0x5」→ {接口 IP: 接口序号}。
+
+    标题行会随系统语言变（接口/Interface），但这行本身中英文一致。
+    """
+    def _load():
+        rc, out, _ = run(["arp", "-a"], timeout=20)
+        m = {}
+        if rc != 0 or not out:
+            return m
+        for line in out.splitlines():
+            r = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})\s*-{2,}\s*0x([0-9a-fA-F]+)",
+                          line)
+            if r:
+                m[r.group(1)] = int(r.group(2), 16)
+        return m
+    return _nat_cached("arp", _load)
+
+
+def _nat_netsh_ifaces():
+    """`netsh interface ipv4 show interfaces` → {序号: {name,up,mtu,metric}}。
+
+    表头是本地化的，但列本身固定是「序号 跃点 MTU 状态 名称」，
+    所以按位置切即可（名称可能含空格，split(None, 4) 一次切完）。
+    """
+    def _load():
+        rc, out, _ = run(["netsh", "interface", "ipv4", "show", "interfaces"],
+                         timeout=25)
+        res = {}
+        if rc != 0 or not out:
+            return res
+        for line in out.splitlines():
+            p = line.split(None, 4)
+            if len(p) < 5 or not p[0].isdigit():
+                continue
+            try:
+                idx, metric, mtu = int(p[0]), int(p[1]), int(p[2])
+            except ValueError:
+                continue
+            state = p[3].strip()
+            low = state.lower()
+            if "断开" in state or "disconnect" in low:
+                up = False           # 明确断开
+            elif "连接" in state or "connect" in low:
+                up = True
+            else:
+                up = None            # 认不出来 → 交给别的证据（见 _nat_iface_table）
+            res[idx] = {"index": idx, "name": p[4].strip(), "mtu": mtu,
+                        "metric": metric, "up": up}
+        return res
+    return _nat_cached("netsh_if", _load)
+
+
+def _nat_netsh_addrs():
+    """`netsh interface ipv4 show addresses` → {友好名: {ip, gw, metric}}。
+
+    标签是本地化的，所以按「关键词 + 值长什么样」判，而不是按列位置。
+    """
+    def _load():
+        rc, out, _ = run(["netsh", "interface", "ipv4", "show", "addresses"],
+                         timeout=25)
+        res = {}
+        if rc != 0 or not out:
+            return res
+        cur = None
+        for line in out.splitlines():
+            s = line.strip()
+            m = re.search(r'"([^"]+)"\s*$', s)
+            if m and ("接口" in s or "interface" in s.lower()):
+                cur = m.group(1)
+                res.setdefault(cur, {"ip": "", "gw": "", "metric": None})
+                continue
+            if cur is None:
+                continue
+            ips = re.findall(r"\d{1,3}(?:\.\d{1,3}){3}", s)
+            if not ips:
+                continue
+            low = s.lower()
+            if "网关" in s or "gateway" in low:
+                if not res[cur]["gw"] and "跃点" not in s and "metric" not in low:
+                    res[cur]["gw"] = ips[0]
+            elif "掩码" in s or "mask" in low or "前缀" in s or "prefix" in low:
+                continue                      # 子网前缀那一行不能当 IP
+            else:
+                res[cur]["ip"] = res[cur]["ip"] or ips[0]
+        return res
+    return _nat_cached("netsh_addr", _load)
+
+
+def _nat_iface_table():
+    """把几个源头合成 {序号: {index,name,desc,ip,gw,up,mtu,metric,src}}。"""
+    def _load():
+        rp = _nat_route_print()
+        rp_ifaces = rp.get("ifaces") or {}
+        ns_if = _nat_netsh_ifaces()
+        ns_addr = _nat_netsh_addrs()
+        ip2idx = _nat_arp_map()
+        live_ips = {r["ip"] for r in (rp.get("routes") or [])}
+
+        table = {}
+        for idx, nm in ns_if.items():
+            table[idx] = {"index": idx, "name": nm["name"], "desc": "",
+                          "ip": "", "gw": "", "up": nm.get("up"),
+                          "mtu": nm.get("mtu") or 0, "metric": nm.get("metric")}
+        for idx, info in rp_ifaces.items():
+            t = table.setdefault(idx, {"index": idx, "name": info["name"],
+                                       "desc": "", "ip": "", "gw": "",
+                                       "up": None, "mtu": 0, "metric": None})
+            t["desc"] = info["name"]
+            if not t["name"]:
+                t["name"] = info["name"]
+
+        # 友好名 → IP / 网关
+        for name, a in ns_addr.items():
+            for t in table.values():
+                if t["name"] == name:
+                    t["ip"] = t["ip"] or (a.get("ip") or "")
+                    t["gw"] = t["gw"] or (a.get("gw") or "")
+                    break
+        # 接口 IP → 序号（arp 这条链最靠得住）
+        for ip, idx in ip2idx.items():
+            t = table.get(idx)
+            if t is not None and not t["ip"]:
+                t["ip"] = ip
+        # 兜底：路由表里出现过、却没有任何接口认领的 IP。
+        # ⚠️ 只在「一个待认领 IP + 一个缺 IP 的接口」这种确定情形下才敢挂，
+        #    否则宁可不填 —— 挂错 IP 比没有 IP 更坏（会指鹿为马）。
+        claimed = {t["ip"] for t in table.values() if t["ip"]}
+        orphan_ip = [ip for ip in live_ips if ip not in claimed]
+        no_ip = [t for t in table.values() if not t["ip"]]
+        if len(orphan_ip) == 1 and len(no_ip) == 1:
+            no_ip[0]["ip"] = orphan_ip[0]
+        for t in table.values():
+            if t["up"] is None:
+                t["up"] = bool(t["ip"]) and t["ip"] in live_ips
+        return table
+    return _nat_cached("iface_table", _load, ttl=3.0)
+
+
+def _nat_alias_by_ip(ip):
+    for t in _nat_iface_table().values():
+        if t.get("ip") == ip:
+            return t.get("name") or t.get("desc") or ""
+    return ""
+
+
+def _nat_interfaces():
+    """→ 与 scan_interfaces_win() 同形的接口列表。"""
+    out = []
+    for idx in sorted(_nat_iface_table()):
+        t = _nat_iface_table()[idx]
+        name = t["name"] or t["desc"]
+        if not name:
+            continue
+        desc = t["desc"] or name
+        blob = (name + " " + desc).lower()
+        wireless = any(k in blob for k in ("wi-fi", "wifi", "wireless", "wlan",
+                                           "802.11", "无线", "WLAN".lower()))
+        if is_loopback_iface(name, desc):
+            itype = 0
+        elif wireless:
+            itype = 71
+        else:
+            itype = 6 if t["ip"] else 0
+        out.append({"name": name, "desc": desc, "type": itype,
+                    "status": "active" if t["up"] else "inactive",
+                    "ipv4": t["ip"] or "", "ipv6_ula": "",
+                    "mtu": t["mtu"] or 0})
+    return out
+
+
+def _nat_snapshot():
+    """→ 与 win_snapshot() 同形（只留默认路由，与 PowerShell 版口径一致）。
+
+    跃点用的是「路由跃点 + 接口跃点」的有效值 —— Windows 真正据以选路的是它。
+    """
+    def _load():
+        tbl = _nat_route_print()
+        table = _nat_iface_table()
+        by_ip = {t["ip"]: t for t in table.values() if t.get("ip")}
+        routes = []
+        for r in tbl.get("routes") or []:
+            if not (r["dest"] == "0.0.0.0" and r["mask"] == "0.0.0.0"):
+                continue
+            t = by_ip.get(r["ip"]) or {}
+            eff = r["metric"] + (t.get("metric") or 0)
+            routes.append({"InterfaceAlias": _nat_alias_by_ip(r["ip"]) or r["ip"],
+                           "NextHop": r["gw"], "InterfaceMetric": eff,
+                           "DestinationPrefix": "0.0.0.0/0"})
+        if not routes:
+            return {}
+        routes.sort(key=lambda x: x.get("InterfaceMetric") or 9999)
+        return {"routes": routes}
+    return _nat_cached("snap", _load, ttl=2.0)
+
+
+def _nat_iface_of_batch(ips):
+    """自家长前缀匹配：某个目标 IP 按当前路由表会从哪个接口出去。
+
+    路由表本身是纯数字，所以这一步没有任何本地化风险 —— 比 PowerShell 那版
+    还稳（那边要靠 Find-NetRoute 的 cmdlet）。
+    """
+    out = {}
+    if not ips:
+        return out
+    rules = []
+    for r in (_nat_route_print().get("routes") or []):
+        net, mask = _ip_int(r["dest"]), _ip_int(r["mask"])
+        if net is None or mask is None:
+            continue
+        rules.append((mask, r.get("metric") or 0, net & mask, r["ip"]))
+    # 掩码长的优先；同为 /0 这种打平时按跃点数小的赢 ——
+    # Windows 真正据以选路的就是「掩码最长 → 跃点最小」，少这一步会在
+    # 隧道和物理口都挂着默认路由时挑错出口。
+    rules.sort(key=lambda x: (-x[0], x[1]))
+    for ip in ips:
+        v = _ip_int(ip)
+        if v is None:
+            out[ip] = ""
+            continue
+        hit = ""
+        for mask, _metric, net, iface_ip in rules:
+            if v & mask == net:
+                hit = _nat_alias_by_ip(iface_ip) or iface_ip
+                break
+        out[ip] = hit
+    return out
+
+
+def _nat_routes_snapshot():
+    """→ {(前缀, 接口名)}，与 macOS 版口径对齐（默认路由写成 "default"）。"""
+    def _load():
+        out = set()
+        for r in (_nat_route_print().get("routes") or []):
+            mask = _ip_int(r["mask"])
+            if mask is None:
+                continue
+            plen = _mask_len(mask)
+            dest = "default" if plen == 0 else "%s/%d" % (r["dest"], plen)
+            out.add((dest, _nat_alias_by_ip(r["ip"]) or r["ip"]))
+        return out
+    return _nat_cached("routes_snap", _load, ttl=2.0)
+
+
+def _nat_registry_apps():
+    """直接读注册表三个「卸载」键 —— 标准库 winreg，不需要 PowerShell。"""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    out, seen = [], set()
+    sub = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    roots = [(winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
+             (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY),
+             (winreg.HKEY_CURRENT_USER, 0)]
+    for hive, flag in roots:
+        try:
+            key = winreg.OpenKey(hive, sub, 0, winreg.KEY_READ | flag)
+        except OSError:
+            continue
+        try:
+            count = winreg.QueryInfoKey(key)[0]
+            for i in range(count):
+                try:
+                    child = winreg.EnumKey(key, i)
+                    with winreg.OpenKey(key, child) as sk:
+                        def _gv(v):
+                            try:
+                                return winreg.QueryValueEx(sk, v)[0]
+                            except OSError:
+                                return ""
+                        dn = str(_gv("DisplayName") or "")
+                        if not dn or dn.lower() in seen:
+                            continue
+                        seen.add(dn.lower())
+                        out.append({"name": dn,
+                                    "loc": str(_gv("InstallLocation") or ""),
+                                    "icon": str(_gv("DisplayIcon") or "")})
+                except OSError:
+                    continue
+        finally:
+            try:
+                winreg.CloseKey(key)
+            except OSError:
+                pass
+    return out
+
+
+def _nat_service_list():
+    """`sc query type= service state= all` —— 字段名恒为英文，不受语言影响。"""
+    rc, out, _ = run(["sc.exe", "query", "type=", "service", "state=", "all"],
+                     timeout=45)
+    if rc != 0 or not out:
+        return []
+    res, cur = [], None
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("SERVICE_NAME:"):
+            if cur and cur.get("name"):
+                res.append(cur)
+            cur = {"name": s.split(":", 1)[1].strip(),
+                   "display": "", "running": False}
+        elif cur is not None and s.startswith("DISPLAY_NAME:"):
+            cur["display"] = s.split(":", 1)[1].strip()
+        elif cur is not None and s.startswith("STATE"):
+            v = s.split(":", 1)[1].strip().upper()
+            cur["running"] = v.startswith("4") or "RUNNING" in v
+    if cur and cur.get("name"):
+        res.append(cur)
+    return res
+
+
+def _nat_vpn_list():
+    """系统 VPN = rasphone.pbk（INI 文件）。读文件，不需要 PowerShell。"""
+    bases = [os.environ.get("APPDATA") or "",
+             os.environ.get("PROGRAMDATA") or ""]
+    out, seen = [], set()
+    for base in bases:
+        if not base:
+            continue
+        path = os.path.join(base, "Microsoft", "Network", "Connections",
+                            "Pbk", "rasphone.pbk")
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        txt = ""
+        for enc in ("utf-8-sig", "gbk", "utf-16", "latin-1"):
+            try:
+                txt = raw.decode(enc)
+                if "[" in txt:
+                    break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        if not txt:
+            continue
+        for blk in re.split(r"^\[", txt, flags=re.M)[1:]:
+            lines = blk.splitlines()
+            if not lines:
+                continue
+            name = lines[0].strip().rstrip("]").strip()
+            if not name or name in seen:
+                continue
+            body = "\n".join(lines[1:])
+            srv = ""
+            for pat in (r"^\s*PhoneNumber\s*=\s*(\S+)",
+                        r"^\s*ServerAddress\s*=\s*(\S+)",
+                        r"^\s*Address\s*=\s*(\S+)"):
+                m = re.search(pat, body, re.M | re.I)
+                if m:
+                    srv = m.group(1)
+                    break
+            seen.add(name)
+            out.append({"name": name, "server": srv, "status": ""})
+    return out
+
+
+def _nat_processes():
+    """`tasklist /fo csv /nh` → 进程名（ASCII），比 Get-Process 更便宜。"""
+    rc, out, _ = run(["tasklist", "/fo", "csv", "/nh"], timeout=40)
+    if rc != 0 or not out:
+        return ""
+    names = []
+    for line in out.splitlines():
+        m = re.match(r'\s*"([^"]+)"', line)
+        if m:
+            names.append(m.group(1).lower())
+    return " ".join(names)
+
+
+def _nat_tunnel_server_ips(keywords):
+    """`netstat -ano` + `tasklist` 代替 Get-NetTCPConnection。"""
+    rc, out, _ = run(["netstat", "-ano"], timeout=30)
+    if rc != 0 or not out:
+        return set()
+    pid2name = {}
+    rc2, tbl, _ = run(["tasklist", "/fo", "csv", "/nh"], timeout=40)
+    if rc2 == 0:
+        for line in tbl.splitlines():
+            m = re.match(r'\s*"([^"]+)","(\d+)"', line)
+            if m:
+                pid2name[m.group(2)] = m.group(1).lower()
+    found = set()
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) < 5 or p[0].upper() != "TCP" or p[3].upper() != "ESTABLISHED":
+            continue
+        host = p[2].rsplit(":", 1)[0].strip("[]")
+        if not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+            continue
+        if not is_public_ip(host):
+            continue
+        name = pid2name.get(p[4], "")
+        if name and any(k in name for k in keywords):
+            found.add(host)
+    return found
+
+
+def run_elevated_win_cmd(commands):
+    """PowerShell 不可用时的提权通道：`cmd.exe /c <临时 bat>`。
+
+    与 PowerShell 版一样靠「脚本自己写结果文件 + 末尾哨兵」回读，
+    不看退出码（cmd 的 errorlevel 会被中间命令带偏）。
+    bat 一律写 **GBK**（本项目的既定约定：Windows 上不能指望 chcp）。
+    """
+    import ctypes
+    out_tmp = os.path.join(tempfile.gettempdir(),
+                           "tunmgr_out_%d.txt" % os.getpid())
+    try:
+        os.remove(out_tmp)
+    except OSError:
+        pass
+    lines = ["@echo off",
+             'set "TM_OUT=%s"' % out_tmp,
+             '>>"%TM_OUT%" echo __TM_BEGIN__']
+    lines.extend(commands)
+    lines.append('>>"%TM_OUT%" echo __TM_DONE__')
+    bat = os.path.join(tempfile.gettempdir(), "tunmgr_%d.bat" % os.getpid())
+    text = "\r\n".join(lines) + "\r\n"
+    try:
+        data = text.encode("gbk")
+    except UnicodeEncodeError:
+        data = text.encode("gbk", "replace")
+    try:
+        with open(bat, "wb") as f:
+            f.write(data)
+    except OSError as e:
+        return False, "临时脚本写不进去：%s" % e, False
+    params = '/c "%s"' % bat if " " not in bat else '/c ""%s""' % bat
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "cmd.exe", params, None, 0)
+    except OSError as e:
+        return False, "UAC 启动失败: %s" % e, False
+    if rc <= 32:
+        return False, "UAC 被取消或被拒绝", True
+    deadline = time.time() + 90
+    content = ""
+    finished = False
+    while time.time() < deadline:
+        time.sleep(0.4)
+        try:
+            with open(out_tmp, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        for enc in ("utf-8", "gbk", "utf-16"):
+            try:
+                content = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            content = raw.decode("utf-8", "replace")
+        if "__TM_DONE__" in content:
+            finished = True
+            break
+    for p in (bat, out_tmp):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    if not finished:
+        return False, "提权命令执行超时（90 秒）", False
+    body = content.replace("__TM_BEGIN__", "").replace("__TM_DONE__", "")
+    body = "\n".join(l for l in body.splitlines() if l.strip())
+    ok = "__TM_FAIL__" not in body
+    return ok, body.strip(), False
+
+
+def win_env_status():
+    """Windows 上「读取通道到底通不通」—— 让界面能解释「为什么一片空白」。
+
+    非 Windows 返回空 dict（前端据此不显示这块）。
+    """
+    if not IS_WIN:
+        return {}
+    ok, err = ps_available()
+    if ok:
+        return {"powershell": True, "powershell_error": "",
+                "native_fallback": False, "native_ifaces": 0,
+                "note": ""}
+    try:
+        n = len(_nat_interfaces())
+    except Exception:                    # noqa: BLE001 —— 诊断信息本身不该炸
+        n = 0
+    if n:
+        note = "PowerShell 被系统策略禁用，已改用原生命令读取（当前读到 %d 个网卡）" % n
+    else:
+        note = ("PowerShell 被系统策略禁用，原生命令也没读上网卡信息 —— "
+                "本机可能装了企业安全管理软件。程序仍能启动，但「网卡 / 隧道 / "
+                "出口」这些依赖系统查询的功能会不全。")
+    return {"powershell": False, "powershell_error": err[:300],
+            "native_fallback": n > 0, "native_ifaces": n, "note": note}
+
+
+def _win_registry_apps():
+    """从注册表三个「卸载」键读出已安装程序（名称 / 安装位置 / 图标）。"""
+    if not ps_available()[0]:
+        return _nat_registry_apps()          # winreg 直读，不依赖 PowerShell
+    rc, out, _ = run_ps(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "$k=@('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+        "'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+        "'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*');"
+        "Get-ItemProperty $k -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.DisplayName } | "
+        "Select-Object DisplayName,InstallLocation,DisplayIcon | "
+        "ConvertTo-Json -Depth 3"
+    )
+    if rc != 0 or not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    return [{"name": str(d.get("DisplayName") or ""),
+             "loc": str(d.get("InstallLocation") or ""),
+             "icon": str(d.get("DisplayIcon") or "")}
+            for d in data if d.get("DisplayName")]
+
+
+def _win_service_list():
+    """Windows 服务清单（Name / DisplayName / 是否在跑）。"""
+    if not ps_available()[0]:
+        return _nat_service_list()           # sc query，字段名恒英文
+    rc, out, _ = run_ps(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "Get-Service | Select-Object Name,DisplayName,Status | ConvertTo-Json -Depth 3"
+    )
+    if rc != 0 or not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    res = []
+    for d in data:
+        try:
+            running = int(d.get("Status")) == 4     # ServiceControllerStatus.Running
+        except (TypeError, ValueError):
+            running = False
+        res.append({"name": str(d.get("Name") or ""),
+                    "display": str(d.get("DisplayName") or ""),
+                    "running": running})
+    return res
+
+
+def _win_installed_apps():
+    return _win_cached("apps", 120, _win_registry_apps)
+
+
+def _win_services():
+    return _win_cached("svcs", 30, _win_service_list)
+
+
+def _win_exe_of(app, keywords, max_scan=400):
+    """在安装目录里挑一个最像「主程序」的 exe。"""
+    icon = (app.get("icon") or "").strip().strip('"')
+    if icon.lower().endswith(".exe") and os.path.isfile(icon):
+        return icon
+    loc = (app.get("loc") or "").strip().strip('"')
+    if not loc or not os.path.isdir(loc):
+        return ""
+    try:
+        names = sorted(os.listdir(loc))[:max_scan]
+    except OSError:
+        return ""
+    first = ""
+    for n in names:
+        low = n.lower()
+        if not low.endswith(".exe"):
+            continue
+        if any(k in low for k in keywords):
+            return os.path.join(loc, n)
+        if not first and "unins" not in low:
+            first = os.path.join(loc, n)
+    return first
+
+
+def _find_apps_win(keywords):
+    """按关键词找已安装客户端的主程序（对应 macOS 的 _find_apps）。"""
+    hits = []
+    for a in _win_installed_apps():
+        blob = (a["name"] + " " + a["loc"]).lower()
+        if not any(k in blob for k in keywords):
+            continue
+        exe = _win_exe_of(a, keywords)
+        if exe:
+            hits.append(exe)
+    return hits
+
+
+def _find_services_win(keywords):
+    """按关键词找 Windows 服务（对应 macOS 的 _find_launchd）。
+
+    短于 4 个字符的关键词一律不参与服务匹配 —— 否则 `wg` / `ssr` 这类
+    会和系统自带服务撞名，把不相干的 SCM 条目认成隧道客户端。
+    """
+    kw = [k for k in keywords if len(k) >= 4]
+    if not kw:
+        return []
+    hits = []
+    for s in _win_services():
+        blob = (s["name"] + " " + s["display"]).lower()
+        if any(k in blob for k in kw):
+            hits.append(s)
+    return hits
+
+
+def _win_vpn_list():
+    """Windows 自带 VPN 连接（可脱离客户端 App，直接用 rasdial 启停）。"""
+    if not ps_available()[0]:
+        return _nat_vpn_list()               # 读 rasphone.pbk
+    rc, out, _ = run_ps(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "Get-VpnConnection -ErrorAction SilentlyContinue | "
+        "Select-Object Name,ServerAddress,ConnectionStatus | ConvertTo-Json -Depth 3"
+    )
+    if rc != 0 or not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    res = []
+    for d in data:
+        name = str(d.get("Name") or "")
+        if name:
+            res.append({"name": name,
+                        "server": str(d.get("ServerAddress") or ""),
+                        "status": str(d.get("ConnectionStatus") or "")})
+    return res
+
+
+def _win_outlet_parts(entry, keywords):
+    """Windows 上一个出口的「应用 / 服务 / 提示」。
+
+    返回 (apps, services, kind, hint)；services 是服务字典列表。
+    停与启用的是同一批服务 —— Windows 上没有 launchd 那种「域/标签」的区分。
+
+    ⚠️ `OUTLET_RULES` 里给 aTrust 写死的 stop_jobs 是 **macOS 的 launchd 标签**，
+    在 Windows 上根本不存在。所以这里**不读那张表**，一律以实测枚举到的
+    SCM 服务为准（只有 `mode: manual` 的意思在 Windows 上依然成立）。
+    """
+    rule = OUTLET_RULES.get(entry["name"]) or {}
+    apps = _find_apps_win(keywords)
+    manual = rule.get("mode") == "manual"
+    services = [] if manual else _find_services_win(keywords)
+    if manual:
+        hint = rule.get("reason") or "需要在它自己的界面里手动开关"
+    elif services:
+        hint = f"停止 Windows 服务（{len(services)} 个）"
+    elif apps:
+        hint = "打开它的 App，再在里面手动开启"
+    else:
+        hint = "需要手动操作"
+    kind = "service" if services else ("app" if apps else "manual")
+    return apps, services, kind, hint
+
+
 def system_vpns():
     """macOS 原生 VPN 列表（scutil --nc）—— 启停不需要 root。"""
     out = []
@@ -1526,31 +2681,45 @@ def discover_outlets(res=None):
         if entry.get("cat") not in OUTLET_CATS:
             continue                       # 覆盖网络 / 虚拟网卡不是「出口」
         kws = _kb_keywords(entry)
-        apps = _find_apps(kws)
-        daemons, agents = _find_launchd(kws)
         owned, carrying = _outlet_ifaces(entry["name"], ifaces, egress, owners)
-        installed = bool(apps or daemons or agents)
+
+        if IS_WIN:
+            # Windows：三个可控点只剩「注册表里的应用」与「SCM 服务」。
+            apps, services, kind, hint = _win_outlet_parts(entry, kws)
+            daemons, agents = [], []
+            stop_jobs = start_plists = [s["name"] for s in services]
+            can_stop = bool(services)
+            can_start = bool(services or apps)
+            installed = bool(apps or services)
+            bits = ([_app_name(a) for a in apps]
+                    + [s["display"] or s["name"] for s in services])
+        else:
+            apps = _find_apps(kws)
+            daemons, agents = _find_launchd(kws)
+            installed = bool(apps or daemons or agents)
+
+            rule = OUTLET_RULES.get(entry["name"]) or {}
+            if rule.get("mode") == "manual":
+                stop_jobs, start_plists = [], []
+                kind, can_stop, can_start = "manual", False, False
+                hint = rule.get("reason") or "需要在它自己的界面里手动开关"
+            else:
+                cand = _stoppable(daemons + agents)
+                stop_jobs = rule.get("stop_jobs") or [
+                    f"{j['domain']}/{j['label']}" for j in cand]
+                start_plists = rule.get("start_plists") or [j["plist"] for j in cand]
+                can_stop = bool(stop_jobs)
+                can_start = bool(start_plists or apps)
+                kind = ("launchd" if (stop_jobs or start_plists)
+                        else "app" if apps else "manual")
+                hint = ("bootout 守护作业" if stop_jobs
+                        else "打开它的 App，再在里面手动开启" if apps else "需要手动操作")
+
+            bits = ([_app_name(a) for a in apps]
+                    + [j["label"] for j in daemons + agents])
+
         if not installed and not owned:
             continue                       # 本机没装也没跑 → 不进列表
-
-        rule = OUTLET_RULES.get(entry["name"]) or {}
-        if rule.get("mode") == "manual":
-            stop_jobs, start_plists = [], []
-            kind, can_stop, can_start = "manual", False, False
-            hint = rule.get("reason") or "需要在它自己的界面里手动开关"
-        else:
-            cand = _stoppable(daemons + agents)
-            stop_jobs = rule.get("stop_jobs") or [
-                f"{j['domain']}/{j['label']}" for j in cand]
-            start_plists = rule.get("start_plists") or [j["plist"] for j in cand]
-            can_stop = bool(stop_jobs)
-            can_start = bool(start_plists or apps)
-            kind = ("launchd" if (stop_jobs or start_plists)
-                    else "app" if apps else "manual")
-            hint = ("bootout 守护作业" if stop_jobs
-                    else "打开它的 App，再在里面手动开启" if apps else "需要手动操作")
-
-        bits = [_app_name(a) for a in apps] + [j["label"] for j in daemons + agents]
         outlets.append({
             "key": entry["name"], "name": entry["name"], "cat": entry["cat"],
             "desc": " / ".join(bits[:3]) or "仅检测到接口残留",
@@ -1567,6 +2736,29 @@ def discover_outlets(res=None):
             "can_stop": can_stop, "can_start": can_start,
             "hint": hint,
         })
+
+    # Windows 自带 VPN：连接名是用户自己起的，没法用关键词匹配，
+    # 所以在 TUNNEL_KNOWLEDGE 之外单独枚举，一个连接一个出口。
+    # 这类出口的好处是**不依赖任何客户端 App** —— rasdial 就能开关。
+    if IS_WIN:
+        for v in _win_vpn_list():
+            key = VPN_PREFIX + v["name"]
+            if any(o["key"] == key for o in outlets):
+                continue
+            conn = (v.get("status") or "").lower() == "connected"
+            outlets.append({
+                "key": key, "name": v["name"] + "（系统 VPN）", "cat": "系统VPN",
+                "desc": v.get("server") or "Windows 自带的 VPN 连接",
+                "confirmed": key in fingerprints,
+                "fp_routes": len((fingerprints.get(key) or {}).get("routes") or []),
+                "running": conn, "in_use": conn,
+                "installed": True, "owned": [], "carrying": [],
+                "adapter": {"kind": "vpn", "apps": [],
+                            "stop_jobs": [], "start_plists": [],
+                            "vpn": v["name"]},
+                "can_stop": conn, "can_start": not conn,
+                "hint": "用 rasdial 连接 / 断开，不必打开任何客户端",
+            })
     return outlets
 
 
@@ -1584,14 +2776,148 @@ def _bootstrap_target(plist):
     return f"gui/{os.getuid()} {plist}"
 
 
+def _ps_try_lines(verb, names):
+    """生成「逐个 try/catch + 末尾报成败」的 PowerShell 片段。
+
+    末尾必须输出 `__TM_OK__` / `__TM_FAIL__` —— 调用方靠这个标记判定，
+    而不是靠返回码（见 `_win_elevated` 的说明）。
+    """
+    lines = ["$ok=$true"]
+    for n in names:
+        s = str(n).replace("'", "''")
+        lines.append("try { %s -Name '%s' -ErrorAction Stop } catch { $ok=$false; "
+                     "Write-Output ('ERR %s: ' + $_.Exception.Message) }"
+                     % (verb, s, s))
+    lines.append("if ($ok) { Write-Output '__TM_OK__' } "
+                 "else { Write-Output '__TM_FAIL__' }")
+    return lines
+
+
+def _cmd_try(cmds):
+    """给 cmd 命令行补上「失败就写 __TM_FAIL__」的尾巴。
+
+    与 `_ps_try_lines` 同一个约定：成败由脚本自己喊出来，不看退出码
+    （cmd 的 errorlevel 会被中间命令带偏，跟 PowerShell 的
+    `$LASTEXITCODE` 一样不可信）。
+    命令里可以用 `%TM_OUT%` 引用结果文件 —— 那由 run_elevated_win_cmd 设好。
+    """
+    out = []
+    for c in cmds:
+        out.append('%s >nul 2>&1 && >>"%%TM_OUT%%" echo __TM_OK__ '
+                   '|| >>"%%TM_OUT%%" echo __TM_FAIL__ "%s"'
+                   % (c, _cmd_safe(c)))
+    return out
+
+
+def _cmd_safe(s, n=70):
+    """把一段命令名塞进 echo 里的安全形式（去掉 cmd 的元字符）。"""
+    return re.sub(r'[&|<>^"\r\n]', " ", str(s))[:n]
+
+
+def _cmd_start_stop(verb, names):
+    """sc start / sc stop 的 cmd 行（对应 PowerShell 的 Start/Stop-Service）。"""
+    lines = []
+    for n in names:
+        s = str(n).strip()
+        lines.append('sc.exe %s "%s"' % (verb, s.replace('"', "")))
+    return _cmd_try(lines)
+
+
+def _cmd_set_dns(alias, servers):
+    """netsh 版 DNS 设置（对应 Set-DnsClientServerAddress）。"""
+    a = str(alias).replace('"', "")
+    cmds = []
+    if servers:
+        cmds.append('netsh interface ipv4 set dns name="%s" static %s primary'
+                    % (a, servers[0]))
+        if len(servers) > 1:
+            cmds.append('netsh interface ipv4 add dns name="%s" %s index=2'
+                        % (a, servers[1]))
+    else:
+        cmds.append('netsh interface ipv4 set dns name="%s" source=dhcp' % a)
+    return _cmd_try(cmds)
+
+
+def _cmd_remove_routes(dests):
+    """route delete 的 cmd 行（对应 Remove-NetRoute）。
+
+    `route delete` 不吃 CIDR，得拆成「网络 + mask」，所以这里先转换；
+    转不了的（比如 macOS netstat 那种「192.168.1」裸网络）就原样交给 route。
+    """
+    cmds = []
+    for d in dests:
+        s = str(d).strip()
+        if "/" in s:
+            net, _, plen = s.partition("/")
+            mask = _mask_from_len(int(plen)) if plen.isdigit() else None
+            if mask:
+                cmds.append("route.exe delete %s mask %s" % (net, mask))
+                continue
+        cmds.append("route.exe delete %s" % s)
+    return _cmd_try(cmds)
+
+
+def _win_elevated(ps_lines, native_cmds=None):
+    """跑一段提权操作。返回 (ok, 文本, 是否被取消了授权)。
+
+    ⚠️ 为什么不能看返回码：`run_elevated_win` **从不返回 403**（403 是 sudo 的约定），
+    它用 `rc=-1` 表示「UAC 被取消 / 执行超时」，而其余返回码的语义并不可靠
+    （PowerShell 的 cmdlet 根本不设置 `$LASTEXITCODE`）。
+    所以这里改用「脚本自己喊一句 `__TM_OK__`」的约定来判定成败。
+    另外把整段包进 `& { … }`，这样 `*>&1 | Out-File` 才能把**每一行**输出都收进文件
+    （否则只有最后一条语句的输出会被重定向，出错信息会丢）。
+
+    PowerShell 被策略拦死时（真机实测有这种机器），改走 `cmd + 原生命令`。
+    ⚠️ 刻意**不做「PS 失败后再补一次原生」的兜底** —— 那会让用户连着吃两个 UAC 弹窗。
+    走哪条路只看 `ps_available()` 的探测结论。
+    """
+    if not ps_available()[0]:
+        if native_cmds is None:
+            return False, "PowerShell 被策略禁止，且该操作没有 cmd 等价写法", False
+        return run_elevated_win_cmd(native_cmds)
+    script = "& {\n" + "\n".join(ps_lines) + "\n}\n"
+    rc, out, err = run_root(script, None)
+    body = (out or "").strip()
+    if rc == -1 and err:
+        return False, err, True
+    if "__TM_OK__" in body:
+        return True, body.replace("__TM_OK__", "").strip(), False
+    return False, (body.replace("__TM_FAIL__", "").strip()
+                   or err or "执行失败"), False
+
+
 def outlet_stop(key, pw=None, res=None):
     """停掉一个出口。返回 (ok, message)；message 为 NEED_SUDO 表示缺密码。"""
     o = _outlet_by_key(key, res)
     if not o:
         return False, f"未知出口：{key}"
     ad = o["adapter"]
-    if ad["kind"] == "direct":
+    kind = ad.get("kind")
+    if kind == "direct":
         return False, "「物理直连」不是一个可停止的客户端"
+
+    if IS_WIN:
+        if kind == "vpn":
+            rc, out, err = run(["rasdial", ad.get("vpn") or "", "/disconnect"],
+                               timeout=60)
+            if rc != 0:
+                return False, ("断开「%s」失败（rc=%s）：%s"
+                               % (ad.get("vpn"), rc,
+                                  (err or out or "").strip()[:160]))
+            return True, "已断开系统 VPN「%s」" % ad.get("vpn")
+        names = ad.get("stop_jobs") or []
+        if not names:
+            return False, ("%s 没有可自动停止的服务（%s）"
+                           % (o["name"], o.get("hint") or "需要手动操作"))
+        ok, text, cancelled = _win_elevated(
+            _ps_try_lines("Stop-Service -Force", names),
+            _cmd_start_stop("stop", names))
+        if cancelled:
+            return False, "NEED_ADMIN"
+        if not ok:
+            return False, ("停止「%s」未成功：%s"
+                           % (o["name"], text[:200] or "未知原因"))
+        return True, "已停止 %s（%d 个服务）" % (o["name"], len(names))
 
     jobs = ad.get("stop_jobs") or []
     if not jobs:
@@ -1601,6 +2927,11 @@ def outlet_stop(key, pw=None, res=None):
     rc, _o, _e = run_root(cmd, pw)
     if rc == 403:
         return False, "NEED_SUDO"
+    # ⚠️ 这里过去只看「是不是 403」就报成功 —— 其它非零返回码（命令跑不动、
+    #    作业名写错）会被说成「已停止」，用户以为关掉了其实没关。现在如实判定。
+    if rc != 0:
+        return False, (f"停止「{o['name']}」未成功（rc={rc}）："
+                       f"{(_e or _o or '')[:160]}")
     return True, f"已停止 {o['name']}（bootout {len(jobs)} 个作业）"
 
 
@@ -1610,8 +2941,44 @@ def outlet_start(key, pw=None, res=None):
     if not o:
         return False, f"未知出口：{key}"
     ad = o["adapter"]
-    if ad["kind"] == "direct":
+    kind = ad.get("kind")
+    if kind == "direct":
         return True, "物理直连无需启动"
+
+    if IS_WIN:
+        if kind == "vpn":
+            rc, out, err = run(["rasdial", ad.get("vpn") or ""], timeout=90)
+            if rc != 0:
+                return False, ("连接「%s」失败（rc=%s）：%s"
+                               % (ad.get("vpn"), rc,
+                                  (err or out or "").strip()[:160]))
+            return True, "已连接系统 VPN「%s」" % ad.get("vpn")
+
+        msgs = []
+        names = ad.get("start_plists") or []
+        if names:
+            ok, text, cancelled = _win_elevated(
+                _ps_try_lines("Start-Service", names),
+                _cmd_start_stop("start", names))
+            if cancelled:
+                return False, "NEED_ADMIN"
+            if not ok:
+                return False, ("启动「%s」的服务未成功：%s"
+                               % (o["name"], text[:200] or "未知原因"))
+            msgs.append("已启动 %d 个服务" % len(names))
+        for app in ad.get("apps") or []:
+            opener = getattr(os, "startfile", None)
+            if opener is None:
+                msgs.append("无法自动打开 %s" % _app_name(app))
+                continue
+            try:
+                opener(app)
+                msgs.append("已打开 " + _app_name(app))
+            except OSError as e:
+                msgs.append("打开 %s 失败：%s" % (_app_name(app), e))
+        if not msgs:
+            return False, f"{o['name']} 需要你在它的界面里手动开启"
+        return True, "；".join(msgs)
 
     msgs = []
     plists = ad.get("start_plists") or []
@@ -1640,20 +3007,20 @@ def switch_outlet(key, pw=None, res=None):
     if not target:
         return {"ok": False, "target": key, "done": [], "manual": [],
                 "message": f"未知出口：{key}"}
-    if not IS_MAC:
-        return {"ok": False, "target": key, "done": [], "manual": [],
-                "message": "出口切换当前仅支持 macOS"}
 
     done, manual, need_sudo = [], [], False
+
+    # 缺权限时提示语分平台：Windows 是 UAC 弹窗，没有密码可输。
+    priv_hint = "UAC 授权" if IS_WIN else "管理员密码"
 
     for o in outlets:
         if o["key"] == key or not o.get("in_use"):
             continue
         ok, msg = outlet_stop(o["key"], pw, res)
-        if msg == "NEED_SUDO":
+        if msg in PRIV_MSGS:
             need_sudo = True
             done.append({"name": o["name"], "action": "stop", "ok": False,
-                         "detail": "需要管理员密码"})
+                         "detail": f"需要{priv_hint}"})
             continue
         done.append({"name": o["name"], "action": "stop", "ok": ok, "detail": msg})
         if not ok:
@@ -1661,7 +3028,7 @@ def switch_outlet(key, pw=None, res=None):
 
     if not need_sudo and target["key"] != DIRECT_OUTLET:
         ok, msg = outlet_start(key, pw, res)
-        if msg == "NEED_SUDO":
+        if msg in PRIV_MSGS:
             need_sudo = True
         done.append({"name": target["name"], "action": "start", "ok": ok,
                      "detail": msg})
@@ -1670,7 +3037,7 @@ def switch_outlet(key, pw=None, res=None):
 
     if not need_sudo:
         n, cmsg = clean_residual_routes(pw)
-        if cmsg == "NEED_SUDO":
+        if cmsg in PRIV_MSGS:
             need_sudo = True
         elif n:
             done.append({"name": "残留路由", "action": "clean", "ok": True,
@@ -1680,7 +3047,7 @@ def switch_outlet(key, pw=None, res=None):
         manual.append("若仍有加速器在自行接管流量，请在它的界面里关掉加速")
 
     if need_sudo:
-        msg = "需要管理员密码才能完成自动步骤"
+        msg = f"需要{priv_hint}才能完成自动步骤"
     elif manual:
         msg = "自动步骤已完成，请继续完成下面的手动步骤"
     else:
@@ -1786,6 +3153,34 @@ def forget_fingerprint(key):
 
 def _routes_snapshot():
     """当前 IPv4 路由集合：{(dest, iface)}。"""
+    if IS_WIN:
+        if not ps_available()[0]:
+            return _nat_routes_snapshot()
+        # Windows 用 Get-NetRoute，能和 macOS 一样拿到「接口别名」而不是 IP
+        # （route print 的 Interface 列给的是 IP，还得再翻译一次）。
+        rc, out, _ = run_ps(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+            "Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+            "Select-Object DestinationPrefix,InterfaceAlias | "
+            "ConvertTo-Json -Depth 3"
+        )
+        if rc != 0 or not out:
+            return set()
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return set()
+        if isinstance(data, dict):
+            data = [data]
+        res = set()
+        for d in data:
+            dest = str(d.get("DestinationPrefix") or "")
+            if not dest:
+                continue
+            if dest == "0.0.0.0/0":
+                dest = "default"          # 与 macOS 的写法对齐，好让上层统一过滤
+            res.add((dest, str(d.get("InterfaceAlias") or "")))
+        return res
     out = set()
     for line in _sh("netstat -rn -f inet").splitlines():
         p = line.split()
@@ -1860,8 +3255,6 @@ def identify_outlet(key, pw=None, wait=6):
     这是唯一**通用可靠**的归属确认法。代价是需要短暂停掉该客户端
     （aTrust 恢复后可能还要重新登录）。
     """
-    if not IS_MAC:
-        return {"ok": False, "message": "归属确认当前仅支持 macOS"}
     res = do_scan()
     o = next((x for x in discover_outlets(res) if x["key"] == key), None)
     if not o:
@@ -1877,7 +3270,10 @@ def identify_outlet(key, pw=None, wait=6):
 
     time.sleep(max(2, int(wait)))
 
-    mid_r, mid_i = _routes_snapshot(), _ifaces_snapshot()
+    # ⚠️ 这里以前写的是 `_ifaces_snapshot()` —— 那个名字**从来没定义过**，
+    #    所以凡是「能自动停止」的出口（aTrust 这类）一点「确认归属」就 NameError。
+    #    它和上面 `before_i` 取的是同一个东西，直接用 active_ifaces()。
+    mid_r, mid_i = _routes_snapshot(), active_ifaces()
 
     # 无论成败都要恢复
     ok2, msg2 = outlet_start(key, pw, res)
@@ -1946,6 +3342,11 @@ def local_addr_map(interfaces=None):
                 m[i["ipv4"]] = i["name"]
         if m:
             return m
+    if IS_WIN:
+        for i in scan_interfaces_win():
+            if i.get("ipv4"):
+                m[i["ipv4"]] = i["name"]
+        return m
     cur = ""
     for line in _sh("ifconfig").splitlines():
         if line and not line[0].isspace():
@@ -1997,6 +3398,13 @@ def first_hop(ip):
     （这点比 traceroute 强 —— 后者在很多受限环境里会被拒）。
     实在拿不到再退回 traceroute。
     """
+    if IS_WIN:
+        # Windows 的 ping 用 `-i` 指定 TTL、`-w` 是毫秒超时。
+        # TTL=1 会逼第一跳回一条 "Reply from x.x.x.x: TTL expired in transit."
+        rc, out, _ = run(["ping", "-n", "1", "-i", "1", "-w", "1000", ip],
+                         timeout=6)
+        m = re.search(r"[Rr]eply from\s+(\d+\.\d+\.\d+\.\d+)", out or "")
+        return m.group(1) if m else ""
     out = _sh(f"ping -c 1 -m 1 -W 400 -t 2 {ip} 2>&1", timeout=4)
     m = re.search(r"from\s+\S+\s+\((\d+\.\d+\.\d+\.\d+)\)", out)
     if m:
@@ -2044,6 +3452,11 @@ def dhcp_dns(iface):
     """物理网卡从 DHCP 拿到的 DNS —— 「没被任何隧道或手动配置污染」的原始值。"""
     if not iface:
         return []
+    if IS_WIN:
+        # Windows 没有命令行办法读回「DHCP 当初下发的那组 DNS」——
+        # 一旦被改过，Get-DnsClientServerAddress 只会给当前值。
+        # 这里如实返回空，上层的「DNS 是否被覆盖」判定在 Windows 上会跳过。
+        return []
     rc, out, _ = run(["ipconfig", "getoption", iface, "domain_name_server"])
     if rc != 0 or not out.strip():
         return []
@@ -2052,6 +3465,28 @@ def dhcp_dns(iface):
 
 def system_dns_servers():
     """当前系统实际生效的 DNS（只看主解析器，避免把 VPN 推送的一堆都算进来）。"""
+    if IS_WIN:
+        rc, out, _ = run_ps(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+            "Get-DnsClientServerAddress -AddressFamily IPv4 "
+            "-ErrorAction SilentlyContinue | "
+            "Where-Object { $_.ServerAddresses.Count -gt 0 } | "
+            "Select-Object -ExpandProperty ServerAddresses | ConvertTo-Json"
+        )
+        if rc != 0 or not out:
+            return []
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(data, str):
+            data = [data]
+        srv = []
+        for s in data or []:
+            s = str(s).strip()
+            if s and s not in srv:
+                srv.append(s)
+        return srv[:6]
     srv = []
     out = _sh("scutil --dns 2>/dev/null")
     block = out.split("resolver #")[1] if "resolver #" in out else out
@@ -2155,6 +3590,18 @@ def sys_resolve(name):
 
 def phys_iface_guess():
     """猜物理出口：默认路由那条若非隧道就用它，否则找第一个活跃的物理口。"""
+    if IS_WIN:
+        def_iface, def_gw = default_route()
+        phys = def_iface if is_phys_iface(def_iface) else ""
+        if not phys:
+            for i in scan_interfaces_win():
+                if i.get("status") != "active":
+                    continue
+                if is_phys_iface(i["name"], i.get("desc") or ""):
+                    phys = i["name"]
+                    break
+        gw = def_gw if phys == def_iface else (phys_gateway(phys) if phys else def_gw)
+        return phys, gw
     def_iface, def_gw = default_route_mac()
     phys = def_iface if is_phys_iface(def_iface) else ""
     if not phys:
@@ -2166,13 +3613,20 @@ def phys_iface_guess():
 
 
 def quick_egress(res):
-    """轻量版「声明 vs 实测」：只做 UDP 选路（不发包、微秒级），可随每次扫描跑。"""
-    if not IS_MAC:
-        return []
+    """轻量版「声明 vs 实测」：只做 UDP 选路（不发包、微秒级），可随每次扫描跑。
+
+    Windows 的「声明」要一次问完 —— Find-NetRoute 每条都起一次 PowerShell
+    太慢，所以先把这几个目标凑成一批。
+    """
     am = local_addr_map(res.get("interfaces"))
+    targets = TRUTH_TARGETS[:4]
+    if IS_WIN:
+        decls = iface_of_win_batch([ip for _l, ip in targets])
+    else:
+        decls = {ip: iface_of_mac(ip) for _l, ip in targets}
     rows = []
-    for label, ip in TRUTH_TARGETS[:4]:
-        decl = iface_of_mac(ip)
+    for label, ip in targets:
+        decl = decls.get(ip, "")
         src = src_addr_for(ip)
         sif = am.get(src, "")
         rows.append({
@@ -2185,12 +3639,9 @@ def quick_egress(res):
 
 def do_trace():
     """真实流量体检：不看配置，只看事实。返回结构化报告 + 一句话结论。"""
-    if not IS_MAC:
-        return {"error": f"暂仅支持 macOS（当前 {PLATFORM}）"}
-
     t0 = time.time()
     phys, phys_gw = phys_iface_guess()
-    def_iface, def_gw = default_route_mac()
+    def_iface, def_gw = default_route()
     dhcp = dhcp_dns(phys)
     cur_dns = system_dns_servers()
     query_dns = ipv4_dns_servers(cur_dns) or ["223.5.5.5"]   # 直查只用 IPv4
@@ -2199,10 +3650,13 @@ def do_trace():
     # 用固定 IP 而不是域名 —— 这样即使 DNS 已经挂了，这一栏照样能出结论
     am = local_addr_map()
     hops = parallel_map(first_hop, [ip for _l, ip in TRUTH_TARGETS], workers=6)
+    decl_map = (iface_of_win_batch([ip for _l, ip in TRUTH_TARGETS])
+                if IS_WIN
+                else {ip: iface_of_mac(ip) for _l, ip in TRUTH_TARGETS})
     routes = []
     for (label, ip), hop in zip(TRUTH_TARGETS, hops):
         hop = hop or ""                          # 实测：TTL=1 逼出来的第一跳
-        decl = iface_of_mac(ip)                  # 声明：路由表怎么写的
+        decl = decl_map.get(ip, "")              # 声明：路由表怎么写的
         src = src_addr_for(ip)                   # 实测：内核给这个目标挑了哪个源地址
         sif = am.get(src, "")
 
@@ -2374,12 +3828,11 @@ def load_health():
 def fake_pool_routes():
     """路由表里指向「假 IP 池」网段的条目（隧道接管的典型痕迹）。"""
     found = []
-    for line in _sh("netstat -rn -f inet").splitlines():
-        p = line.split()
-        if len(p) < 4 or "/" not in p[0]:
+    for dest, _alias in _routes_snapshot():
+        if "/" not in dest:
             continue
-        if re.match(r"^(198\.1[89]\.|100\.6[4-9]\.|240\.0\.0\.)", p[0].split("/")[0]):
-            found.append(p[0])
+        if re.match(r"^(198\.1[89]\.|100\.6[4-9]\.|240\.0\.0\.)", dest.split("/")[0]):
+            found.append(dest)
     return sorted(set(found))
 
 
@@ -2394,6 +3847,162 @@ def _rescue_log(lines):
         pass
 
 
+def _win_do_rescue():
+    """Windows 版应急恢复。
+
+    与 macOS 同一条原则：**只做恢复，不做优化**；每步记 before/after；
+    不做不可逆的事。但有三处必须如实区别对待：
+
+      · 默认出口：**不自动改接口跃点数**。Windows 的跃点数是持久化的网络配置，
+        乱改会在换网络以后留下后遗症 —— 代价大于收益。这里只报告 + 指路。
+      · 残留路由：与 macOS 同口径，只删「指向已消失接口」的条目，绝不动默认路由。
+      · DNS：交回 DHCP 自动派生（ResetServerAddresses），并清一次解析缓存。
+
+    ⚠️ 提权走 UAC，**没有密码可输** —— 用户点了「否」我们只能如实说没做完，
+    绝不返回 NEED_SUDO 去要密码。
+    """
+    steps, manual = [], []
+    need_admin = False
+
+    snap = load_health() or {}
+    phys = snap.get("phys_iface") or ""
+    if not phys:
+        phys, _gw = phys_iface_guess()
+    gw = snap.get("phys_gw") or ""
+    if not gw and phys:
+        gw = phys_gateway(phys)
+
+    before = {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "default_route": list(default_route()),
+        "dns": system_dns_servers(),
+    }
+
+    def add(name, ok, detail):
+        steps.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    # 1) 默认出口：只报告，不自动改（见 docstring）
+    d_iface, d_gw = before["default_route"]
+    if d_iface and is_tunnel_iface(d_iface):
+        add("默认出口 → 物理网卡", False,
+            "默认路由现在在隧道「%s」上。本工具不自动改接口跃点数"
+            "（那是持久化配置，换网络后会留下后遗症）—— "
+            "请用上面的「出口管理」把隧道停掉。" % d_iface)
+    else:
+        add("默认出口 → 物理网卡", True,
+            "已在物理口 %s 上，无需改动"
+            % ("/".join(x for x in (d_iface, d_gw) if x) or "?"))
+
+    # 2) 残留黑洞路由（指向已消失的接口）
+    n, msg = clean_residual_routes()
+    if msg == "NEED_SUDO":
+        need_admin = True
+        add("清理残留黑洞路由", False, "管理员授权被取消")
+    else:
+        add("清理残留黑洞路由", not msg.startswith("清理未完全成功"), msg)
+
+    # 3) 假 IP 池路由
+    fake = fake_pool_routes()
+    if not fake:
+        add("清除假 IP 池路由", True, "未发现假 IP 池路由")
+    else:
+        lines = ["$ok=$true"]
+        for d in fake:
+            s = str(d).replace("'", "''")
+            lines.append("try { Remove-NetRoute -DestinationPrefix '%s' "
+                         "-Confirm:$false -ErrorAction Stop } catch { $ok=$false; "
+                         "Write-Output ('ERR %s: ' + $_.Exception.Message) }"
+                         % (s, s))
+        lines.append("if ($ok) { Write-Output '__TM_OK__' } "
+                     "else { Write-Output '__TM_FAIL__' }")
+        ok, text, cancelled = _win_elevated(lines, _cmd_remove_routes(fake))
+        if cancelled:
+            need_admin = True
+            add("清除假 IP 池路由", False, "管理员授权被取消")
+        else:
+            add("清除假 IP 池路由", ok,
+                ("删除 %d 条（%s）" % (len(fake), ", ".join(fake[:5]))) if ok
+                else (text[:160] or "未知原因"))
+
+    # 4) DNS：优先恢复保存过的健康基线，否则交回 DHCP
+    if not phys:
+        add("DNS 恢复", False, "识别不出物理网卡，跳过")
+    else:
+        saved = load_health()
+        base_dns = ipv4_dns_servers((saved or {}).get("dns_now") or [])
+        cur = before["dns"]
+        if base_dns and set(cur) == set(base_dns):
+            add("DNS 恢复", True, "已是 %s，无需改动" % "、".join(cur))
+        else:
+            alias = str(phys).replace("'", "''")
+            arg = ("-ServerAddresses '%s'" % ",".join(base_dns)) if base_dns \
+                else "-ResetServerAddresses"
+            ok, text, cancelled = _win_elevated([
+                "try { Set-DnsClientServerAddress -InterfaceAlias '%s' %s "
+                "-ErrorAction Stop; Write-Output '__TM_OK__' } "
+                "catch { Write-Output '__TM_FAIL__'; "
+                "Write-Output ('ERR ' + $_.Exception.Message) }" % (alias, arg)],
+                _cmd_set_dns(phys, base_dns))
+            if cancelled:
+                need_admin = True
+                add("DNS 恢复", False, "管理员授权被取消")
+            else:
+                after_txt = "、".join(base_dns) if base_dns else "由 DHCP 自动分配"
+                add("DNS 恢复", ok,
+                    ("%s → %s（%s）" % ("、".join(cur) or "(空)", after_txt,
+                                       "恢复到保存的健康基线" if base_dns
+                                       else "交回 DHCP 自动分配")) if ok
+                    else (text[:160] or "未知原因"))
+
+    # 5) 刷新 DNS 缓存（Windows 上这一步不需要管理员）
+    if ps_available()[0]:
+        rc, out, err = run_ps("Clear-DnsClientCache; if ($?) { '__TM_OK__' }")
+        ok5 = rc == 0 and "__TM_OK__" in (out or "")
+        err5 = err
+    else:
+        rc5, out5, err5 = run(["ipconfig", "/flushdns"], timeout=30)
+        ok5 = rc5 == 0
+    add("刷新 DNS 缓存", ok5, "已清空解析缓存" if ok5 else (err5 or "清理失败")[:120])
+
+    # 复验
+    time.sleep(0.6)
+    ok_v, ms_v, _ = tcp_probe("223.5.5.5", 443, timeout=3)
+    ips_v, _ms_r, _err = sys_resolve("www.baidu.com")
+    verify = {"tcp_ok": ok_v, "tcp_ms": ms_v, "dns_ok": bool(ips_v),
+              "dns_ips": ips_v[:3], "phys_iface": phys}
+    add("复验", bool(ok_v and ips_v),
+        ("能" if ok_v else "不能") + "连通外网（%s ms）；"
+        % (ms_v if ms_v is not None else "-")
+        + ("DNS 解析成功 " + "、".join(ips_v[:2]) if ips_v else "DNS 解析仍失败"))
+    after = {"default_route": list(default_route()), "dns": system_dns_servers()}
+    _rescue_log(
+        ["=" * 60, "[%s] 应急恢复（Windows）" % before["at"],
+         "  before: 默认路由=%s  DNS=%s" % (before["default_route"], before["dns"]),
+         "  after : 默认路由=%s  DNS=%s" % (after["default_route"], after["dns"])]
+        + ["  %s: %s — %s" % (s["name"], "OK" if s["ok"] else "FAIL", s["detail"])
+           for s in steps])
+
+    manual.append("如果隧道客户端还在跑，它可能再次改写 DNS 和路由 —— "
+                  "建议在它的界面里停止加速，或用上面的「出口管理」切到「物理直连」。")
+    if not verify["dns_ok"]:
+        manual.append("DNS 仍解析失败：多半是隧道客户端还在接管，或路由器本身的 DNS 有问题。"
+                      "可以试着把 DNS 手动改成 223.5.5.5 / 119.29.29.29。")
+
+    body = {"steps": steps, "manual": manual, "before": before,
+            "after": after, "verify": verify}
+    if need_admin:
+        return {"ok": False,
+                "message": "有步骤的「管理员授权」被取消或超时，没做完 —— 可以再点一次",
+                "rescue": body}
+    ok_all = all(s["ok"] for s in steps)
+    return {
+        "ok": ok_all,
+        "message": ("应急恢复完成，网络已回到本机直连状态"
+                    if ok_all else "应急恢复部分完成，请查看下面哪一步失败了"),
+        "rescue": body,
+    }
+
+
 def do_rescue(pw=None):
     """一键应急恢复：把路由与 DNS 救回「本机直连」的干净状态。
 
@@ -2402,8 +4011,10 @@ def do_rescue(pw=None):
       · 每步都记 before/after 并落 rescue.log，事后能审计、能对照
       · 不做不可逆的事（不删配置、不动 hosts、不卸软件）
     """
+    if IS_WIN:
+        return _win_do_rescue()
     if not IS_MAC:
-        return {"ok": False, "message": f"暂仅支持 macOS（当前 {PLATFORM}）"}
+        return {"ok": False, "message": f"暂仅支持 Windows / macOS（当前 {PLATFORM}）"}
 
     steps, manual = [], []
     need_pw = False
@@ -3628,6 +5239,237 @@ def capture_result(relays=None):
     return st
 
 
+# ======================================================================
+# 真实流速（L1：接口级累计字节差分）
+# ======================================================================
+# 为什么是这条路，而不是复用上面的 nettop 引擎：
+#
+#   · `netstat -ib` 一次调用约 12 毫秒、**免 root**、跨 *nix，直接给出每个接口开机
+#     以来的累计收发字节；相邻两次采样做差分 = 该接口的**真实速率**（不是估算，
+#     也不花任何额外流量）。上面那套 nettop 引擎回答的是「哪个程序在跑流量」，
+#     但它单次调用有约 5 秒固定开销，且是进程级 —— 根本回答不了
+#     「流量现在走物理网卡还是隧道、隧道占了多少」。
+#   · 隧道客户端（aTrust / Clash 等）在内核里转发，**进程级 socket 计数 ≠ 过隧道的
+#     字节**。所以判断「隧道跑多快」只能靠接口级计数 —— 也就是这里。
+#
+# 语义上要留意：隧道流量会「双层计数」。明文过 utunN，加密后从 en0 出去，
+# 所以 en0 的字节数 ≈ 隧道字节数 + 加密开销 + 真正的直连流量。
+# 因此「走隧道占比」= 隧道接口速率 / 物理接口速率（略小于真实占比，加密开销所致），
+# 上限截到 100%，界面上如实说明这是近似值。
+#
+# Windows 侧：`netstat -e` 只给整机总量、**不分接口**；分接口要用
+#   Get-NetAdapterStatistics（实测在 PowerShell 5.1 上免管理员可读）。
+#   ⚠️ 本机没有 Windows 环境，**该分支未经真机验证**；失败时前端应降级提示。
+
+_FLOW_LOCK = threading.Lock()
+_FLOW_MAX = 60                 # 环形缓冲：保留最近 60 个采样点
+_FLOW_INTERVAL = {"Darwin": 1.0, "Windows": 2.0}   # PowerShell 起进程贵，Windows 放慢一倍
+_FLOW_IDLE = 180.0             # 超过 3 分钟没人来取数 → 采样线程自行退出，不白烧 CPU
+_FLOW = {
+    "hist": [],        # [{"t": 采样时刻, "if": {接口名: [下行 B/s, 上行 B/s]}}]
+    "running": False,
+    "last_req": 0.0,
+    "started_at": 0.0,
+    "error": "",
+}
+
+
+def _nat_flow_counters():
+    """没有 PowerShell 时的兜底：`netstat -e` 只给**整机**累计字节（不分接口）。
+
+    分接口要 Get-NetAdapterStatistics，那是 cmdlet；整机总量 netstat 就够了。
+    所以退化成一个叫「整机」的接口 —— 数字是真的，只是粒度粗一档。
+    """
+    rc, out, _ = run(["netstat", "-e"], timeout=15)
+    if rc != 0 or not out:
+        return None
+    for line in out.splitlines():
+        nums = re.findall(r"\d+", line)
+        if len(nums) == 2:          # 「字节 / Bytes」那一行正好两个大数，且在最前面
+            try:
+                return {"整机": (int(nums[0]), int(nums[1]))}
+            except ValueError:
+                continue
+    return None
+
+
+def _flow_read_counters():
+    """读各接口的累计字节 → {接口名: (Ibytes, Obytes)}；读不到返回 None。"""
+    if IS_MAC:
+        rc, out, _ = run(["netstat", "-ib"], timeout=8)
+        if rc != 0 or not out:
+            return None
+        got = {}
+        for ln in out.splitlines()[1:]:          # 跳过表头
+            tk = ln.split()
+            # 列数会变：<Link#N> 行有的带 MAC、有的不带（lo0 就没有地址列），
+            # 所以一律**从右往左**取，最后 7 列固定是
+            # Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+            if len(tk) < 8:
+                continue
+            name = tk[0].rstrip("*")             # 名字带 * 表示该接口当前是 down
+            if not name or name in got:
+                continue        # 同一接口会按地址族重复出现（<Link#N>/IPv4/IPv6），
+                                # 各行计数完全相同 —— 只留第一行即可
+            try:
+                got[name] = (int(tk[-5]), int(tk[-2]))
+            except ValueError:
+                continue
+        return got or None
+    if IS_WIN:
+        if not ps_available()[0]:
+            return _nat_flow_counters()
+        rc, out, _ = run_ps(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+            "Get-NetAdapterStatistics | Select-Object "
+            "@{n='name';e={$_.Name}},"
+            "@{n='in';e={[int64]$_.ReceivedBytes}},"
+            "@{n='out';e={[int64]$_.SentBytes}} | ConvertTo-Json -Depth 3",
+            timeout=15)
+        if rc != 0 or not out:
+            return _nat_flow_counters()
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict):
+            data = [data]
+        got = {}
+        for a in data:
+            nm = (a or {}).get("name")
+            if nm:
+                got[nm] = (int(a.get("in") or 0), int(a.get("out") or 0))
+        return got or None
+    return None
+
+
+def _flow_kind(name):
+    """按接口名粗分类型。只用于界面分组；判定口径与主扫描保持一致。"""
+    if re.match(r"^lo\d*$", name):
+        return "回环"
+    if is_tunnel_iface(name):
+        return "隧道"
+    if is_phys_iface(name):
+        return "物理"
+    if is_system_iface(name):
+        return "系统虚拟"
+    return "其他"
+
+
+def _flow_loop():
+    """采样循环。以「上次被取数的时刻」为准做闲置退出，避免没人看时白烧 CPU。"""
+    interval = _FLOW_INTERVAL.get(PLATFORM, 1.0)
+    prev = {}
+    while True:
+        with _FLOW_LOCK:
+            if time.time() - _FLOW["last_req"] > _FLOW_IDLE:
+                _FLOW["running"] = False
+                return
+        try:
+            got = _flow_read_counters()
+            now = time.time()
+            if got is None:
+                with _FLOW_LOCK:
+                    _FLOW["error"] = "读不到接口流量计数"
+                time.sleep(interval)
+                continue
+            rates = {}
+            if prev:
+                for nm, (ci, co) in got.items():
+                    p = prev.get(nm)
+                    if not p:
+                        continue                # 这一轮才出现的接口，没有基值
+                    dt = max(0.05, now - p[2])
+                    di, do = ci - p[0], co - p[1]
+                    if di < 0:                  # 接口重开 / 计数器回绕
+                        di = ci
+                    if do < 0:
+                        do = co
+                    rates[nm] = [di / dt, do / dt]
+            prev = {nm: (ci, co, now) for nm, (ci, co) in got.items()}
+            if rates:
+                with _FLOW_LOCK:
+                    _FLOW["hist"].append({"t": round(now, 2), "if": rates})
+                    if len(_FLOW["hist"]) > _FLOW_MAX:
+                        _FLOW["hist"] = _FLOW["hist"][-_FLOW_MAX:]
+                    _FLOW["error"] = ""
+            time.sleep(interval)
+        except Exception as e:      # noqa: BLE001 —— 采样线程绝不能把服务带崩
+            with _FLOW_LOCK:
+                _FLOW["error"] = str(e)
+            time.sleep(interval)
+
+
+def _flow_assemble(hist, err):
+    supported = PLATFORM in _FLOW_INTERVAL
+    out = {"ok": True, "supported": supported, "platform": PLATFORM,
+           "interval": _FLOW_INTERVAL.get(PLATFORM, 0),
+           "window": _FLOW_MAX, "samples": len(hist),
+           "age": (round(time.time() - hist[-1]["t"], 2) if hist else None),
+           "rows": [], "ratio": None,
+           "total": {"down": 0.0, "up": 0.0},
+           "tunnel": {"down": 0.0, "up": 0.0},
+           "error": err or ""}
+    if not supported:
+        out["note"] = (f"接口级流速暂只支持 macOS 与 Windows（当前 {PLATFORM}）。")
+        return out
+
+    # 只保留窗口里真正动过的接口 —— 本机常有二十多个死接口，全塞给前端没意义
+    active = set()
+    for h in hist:
+        for nm, (di, do_) in h["if"].items():
+            if di > 1 or do_ > 1:
+                active.add(nm)
+    last = hist[-1]["if"] if hist else {}
+    for nm in sorted(active):
+        dser = [h["if"].get(nm, [0.0, 0.0])[0] for h in hist]
+        user = [h["if"].get(nm, [0.0, 0.0])[1] for h in hist]
+        cur = last.get(nm) or [0.0, 0.0]
+        out["rows"].append({
+            "name": nm, "kind": _flow_kind(nm),
+            "down": round(cur[0], 1), "up": round(cur[1], 1),
+            "peak_down": round(max(dser), 1), "peak_up": round(max(user), 1),
+            "hist_down": [int(v) for v in dser],
+            "hist_up": [int(v) for v in user],
+        })
+
+    phys = [r for r in out["rows"] if r["kind"] == "物理"]
+    tun = [r for r in out["rows"] if r["kind"] == "隧道"]
+    t_dn = sum(r["down"] for r in tun)
+    t_up = sum(r["up"] for r in tun)
+    p_dn = sum(r["down"] for r in phys)
+    p_up = sum(r["up"] for r in phys)
+    if p_dn <= 1 and p_up <= 1:
+        # 认不出物理网卡（例如 Windows 中文适配器名）→ 退回「所有非回环接口之和」
+        others = [r for r in out["rows"] if r["kind"] != "回环"]
+        p_dn, p_up = sum(r["down"] for r in others), sum(r["up"] for r in others)
+    out["tunnel"] = {"down": round(t_dn, 1), "up": round(t_up, 1)}
+    out["total"] = {"down": round(p_dn, 1), "up": round(p_up, 1)}
+    # 隧道流量会双层计数（明文过 utun、密文再过 en0），所以这个比例是**近似下限**
+    if p_dn > 1:
+        out["ratio"] = round(min(1.0, t_dn / p_dn), 3)
+    if not hist:
+        out["note"] = "正在取第一个采样点（速率要两次采样差分才能算出来）。"
+    elif not out["rows"]:
+        out["note"] = "最近 60 秒所有接口都是零流量 —— 现在没有数据在走。"
+    return out
+
+
+def flow_get():
+    """取流速快照；首个请求会拉起采样线程，闲置 3 分钟后线程自行退出。"""
+    with _FLOW_LOCK:
+        if not _FLOW["running"]:
+            _FLOW["running"] = True
+            _FLOW["hist"] = []
+            _FLOW["error"] = ""
+            _FLOW["started_at"] = time.time()
+            threading.Thread(target=_flow_loop, daemon=True).start()
+        _FLOW["last_req"] = time.time()
+        hist = list(_FLOW["hist"])
+        err = _FLOW["error"]
+    return _flow_assemble(hist, err)
+
+
 # ----------------------------------------------------------------------
 # 诊断规则库（表驱动，便于扩展）
 # ----------------------------------------------------------------------
@@ -4068,11 +5910,15 @@ def scan_win(domains, software):
 
     phys_iface = ""
     for i in raw:
+        if is_loopback_iface(i.get("name"), i.get("desc")):
+            continue                       # 回环口也「有 IP、算 active」，必须排掉
         if i.get("type") in (6, 71) and i.get("status") == "active":
             phys_iface = i["name"]
             break
     if not phys_iface:
         for i in raw:
+            if is_loopback_iface(i.get("name"), i.get("desc")):
+                continue
             if not is_tunnel_iface(i["name"], i["desc"]) and i.get("status") == "active":
                 phys_iface = i["name"]
                 break
@@ -4234,6 +6080,14 @@ def assemble(software, phys_iface, phys_gw, def_iface, interfaces,
         "auto_domains": auto_domains or [],
         "auto_rows": auto_rows or [],
         "auto_enabled": auto_tracker_enabled(),
+        # 最近一次历史库扫描的实况（读到了哪些浏览器、为什么没读到）
+        "auto_status": get_auto_status(),
+        # Windows 上哪些系统读取通道可用（PowerShell 被策略禁了没、原生回退顶没顶上）
+        "win_env": win_env_status(),
+        # 追踪的域名是「临时」的：多久没再看就会被移除，多久扫一次
+        "auto_window": AUTO_WINDOW,
+        "auto_expire": AUTO_EXPIRE,
+        "auto_max": AUTO_MAX,
         "daemon_installed": IS_MAC and os.path.isfile(
             "/Library/LaunchDaemons/com.local.tunnel-manager.plist"),
         "is_root": (os.geteuid() == 0) if not IS_WIN else False,
@@ -4291,6 +6145,16 @@ def detect_bypass_routes(phys_gw, phys_iface):
 
 
 def _detect_bypass_win(phys_gw, phys_iface):
+    """从路由表实时找「本程序加的 /32 直连路由」：主机路由 + 下一跳=物理网关。"""
+    if not ps_available()[0]:
+        found = []
+        for r in (_nat_route_print().get("routes") or []):
+            if r["mask"] != "255.255.255.255" or r["gw"] != phys_gw:
+                continue
+            if phys_iface and (_nat_alias_by_ip(r["ip"]) or r["ip"]) != phys_iface:
+                continue
+            found.append(r["dest"])
+        return sorted(set(found))
     ps = (
         "Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
         "Where-Object { $_.PrefixLength -eq 32 -and $_.NextHop -eq '" + phys_gw + "' } | "
@@ -4308,11 +6172,19 @@ def _detect_bypass_win(phys_gw, phys_iface):
 
 
 def managed_domains():
-    """本程序管理的域名 = 配置表 + 自动追踪到的。
+    """本程序管理的域名 = 配置表 + 自动追踪到的（**去重**）。
 
     扫描展示与撤销操作都用这一份口径，避免「界面显示 3 条、撤销动了 5 条」这类不一致。
+    去重是必须的：同一个域名可能既在配置表里、又被浏览器历史追踪到，
+    重复会让 do_apply 对同一批 IP 连发两条 route add，第二条报错、把整条命令链的返回码带偏。
     """
-    return load_config() + get_auto_domains()
+    out, seen = [], set()
+    for d in load_config() + get_auto_domains():
+        key = (d or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -4360,9 +6232,12 @@ def _probe_tunnel_server_ips():
 
 
 def _probe_tunnel_server_ips_win():
-    kws = ",".join("'" + k + "'" for k in _proc_keywords())
+    kws = _proc_keywords()
+    if not ps_available()[0]:
+        return _nat_tunnel_server_ips(kws)   # netstat -ano + tasklist
+    kw_expr = ",".join("'" + k + "'" for k in kws)
     ps = (
-        f"$kws = @({kws}); "
+        f"$kws = @({kw_expr}); "
         "Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | "
         "Where-Object { $_.RemoteAddress -notmatch '^(10\\.|127\\.|169\\.254\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)' } | "
         "ForEach-Object { $c = $_; $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; "
@@ -4440,7 +6315,16 @@ def bypass_targets(domains, phys_gw, phys_iface):
 
 
 def do_apply(pw=None):
-    domains = load_config()
+    # ⚠️ 必须用 managed_domains()（配置表 + 自动追踪），不能只用 load_config()。
+    # 以前这里只读配置表，于是「自动追踪」追踪到的网站**永远不会被应用** ——
+    # 面板里列得满满当当、主表也标着「被隧道接管」，点「应用」却一条都不变。
+    cfg_domains = load_config()
+    auto_domains = get_auto_domains()
+    # 追踪到的可能已经在配置表里 → 只补差集，避免对同一批 IP 重复 route add
+    cfg_set = {(d or "").strip().lower() for d in cfg_domains}
+    auto_only = [d for d in auto_domains
+                 if (d or "").strip().lower() not in cfg_set]
+    domains = cfg_domains + auto_only
 
     if IS_MAC:
         def_iface, _ = default_route_mac()
@@ -4488,19 +6372,28 @@ def do_apply(pw=None):
     rc, out, err = run_root(cmd_str, pw)
     if rc == 403:
         return None, "NEED_SUDO"
+    if IS_WIN and rc == -1:
+        # Windows 的提权是 UAC，没有密码可输 —— 取消/超时时回 NEED_ADMIN，
+        # 免得前端弹一个在 Windows 上根本没用的密码框。
+        return None, "NEED_ADMIN"
     if rc != 0:
         return False, f"执行失败 (rc={rc})：{err or out}"
 
     vpn_note = (f"，并已跳过 {len(set(skipped_vpn))} 个隧道客户端自身服务器 IP"
                 f"（{'、'.join(sorted(set(skipped_vpn)))}）") if skipped_vpn else ""
+    if auto_only:
+        src_note = (f"（配置表 {len(cfg_domains)} 个 + 自动追踪 {len(auto_only)} 个"
+                    f"，追踪的是临时的，超过 {AUTO_EXPIRE // 60} 分钟没再看会自动移除）")
+    else:
+        src_note = f"（配置表 {len(cfg_domains)} 个，当前没有追踪到域名）"
     saved = write_state(state_ips)
     if not saved:
         # 记录写不进去也必须让用户知道 —— 否则下次 undo 无从下手
         return True, (f"完成：新增 {len(state_ips)} 条直连路由，出口 {phys_iface} ({gw})"
-                      f"{vpn_note}。⚠ 但状态文件写入失败（{STATE_FILE}），"
+                      f"{src_note}{vpn_note}。⚠ 但状态文件写入失败（{STATE_FILE}），"
                       f"撤销时将以路由表实测结果为准。")
     return True, (f"完成：新增 {len(state_ips)} 条直连路由，出口 {phys_iface} ({gw})"
-                  f"{vpn_note}")
+                  f"{src_note}{vpn_note}")
 
 
 def do_undo(pw=None):
@@ -4543,6 +6436,8 @@ def do_undo(pw=None):
     rc, out, err = run_root(cmd_str, pw)
     if rc == 403:
         return None, "NEED_SUDO"
+    if IS_WIN and rc == -1:
+        return None, "NEED_ADMIN"
     if rc != 0:
         return False, f"执行失败 (rc={rc})：{err or out}"
 
@@ -4687,6 +6582,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, do_scan())
             elif path == "/api/config":
                 self._json(200, {"domains": load_config()})
+            elif path == "/api/flow":
+                # 只读采样，不改任何系统配置 → 走"读请求"校验即可，不需要 CSRF
+                self._json(200, flow_get())
             elif path == "/api/steam/overview":
                 self._json(200, do_steam_overview())
             elif path == "/api/steam/capture/result":
@@ -4744,11 +6642,55 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 # 手动把一个域名加入自动追踪集合（与浏览器历史发现的域名同等待遇：
                 # 出现在自动追踪面板和路由表里，超过 AUTO_EXPIRE 没再访问则自动移除）
+                raw = (payload.get("domain") or "").strip().lower()
+                if not raw:
+                    self._json(400, {"ok": False, "message": "域名不能为空"})
+                    return
+                # 用户可能粘整条 URL（https://www.a.com/path?x=1）→ 先规范化成主机名。
+                # ⚠️ 只剥 scheme / 路径 / 端口，**不剥 www.**（理由见本节坑 1）。
+                dom = _extract_domain(raw)
+                if not dom:
+                    self._json(400, {"ok": False,
+                                     "message": f"看不出这是域名：{raw[:60]}"})
+                    return
+                with _auto_lock:
+                    _auto_domains[dom] = time.time()
+                self._json(200, {"ok": True, "domain": dom,
+                                 "message": f"已加入追踪：{dom}"
+                                            f"（{AUTO_EXPIRE // 60} 分钟内没再访问会自动移除；"
+                                            f"要长期生效请用上面的域名列表）",
+                                 "result": do_scan()})
+                return
+            if path == "/api/auto/promote":
+                if not self._check_write(payload):
+                    return
+                # 把追踪中的临时域名「转正」：写进配置表 → 长期生效、不再 10 分钟过期。
+                # 解决的是「追踪列表里看到某个网站一直被隧道接管，却无处一键处理」。
+                dom = _extract_domain((payload.get("domain") or "").strip().lower())
+                if not dom:
+                    self._json(400, {"ok": False, "message": "域名不合法"})
+                    return
+                cfg = load_config()
+                if any((x or "").strip().lower() == dom for x in cfg):
+                    msg = f"{dom} 已经在「需要直连的域名列表」里了"
+                else:
+                    cfg.append(dom)
+                    save_config(cfg)
+                    msg = f"已加入「需要直连的域名列表」：{dom}（长期生效，不会再自动移除）"
+                with _auto_lock:
+                    _auto_domains.pop(dom, None)   # 已转正，不必再占临时名额
+                self._json(200, {"ok": True, "domain": dom, "message": msg,
+                                 "result": do_scan()})
+                return
+            if path == "/api/auto/unpin":
+                if not self._check_write(payload):
+                    return
                 dom = (payload.get("domain") or "").strip().lower()
-                if dom:
-                    with _auto_lock:
-                        _auto_domains[dom] = time.time()
-                self._json(200, {"ok": True, "result": do_scan()})
+                with _auto_lock:
+                    _auto_domains.pop(dom, None)
+                self._json(200, {"ok": True, "domain": dom,
+                                 "message": f"已停止追踪 {dom}",
+                                 "result": do_scan()})
                 return
             if path == "/api/outlet/forget":
                 if not self._check_write(payload):
@@ -4760,9 +6702,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._check_write(payload):
                     return
                 r = identify_outlet(payload.get("key", ""), payload.get("password"))
-                if r.get("message") == "NEED_SUDO":
-                    self._json(403, {"ok": False, "error": "NEED_SUDO",
-                                     "message": "需要管理员密码"})
+                if r.get("message") in PRIV_MSGS:
+                    self._json(403, priv_error())
                 else:
                     self._json(200 if r.get("ok") else 500,
                                {"ok": r.get("ok"), "message": r.get("message"),
@@ -4773,9 +6714,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 r = cancel_switch(payload.get("password"))
                 msg = r.get("message")
-                if msg == "NEED_SUDO":
-                    self._json(403, {"ok": False, "error": "NEED_SUDO",
-                                     "message": "需要管理员密码"})
+                if msg in PRIV_MSGS:
+                    self._json(403, priv_error())
                 else:
                     self._json(200 if r.get("ok") else 500,
                                {"ok": r.get("ok"), "message": msg,
@@ -4794,9 +6734,8 @@ class Handler(BaseHTTPRequestHandler):
                     fn = outlet_stop if act == "stop" else outlet_start
                     ok, msg = fn(key, pw)
                     r = None
-                if msg == "NEED_SUDO":
-                    self._json(403, {"ok": False, "error": "NEED_SUDO",
-                                     "message": "需要管理员密码"})
+                if msg in PRIV_MSGS:
+                    self._json(403, priv_error())
                 else:
                     self._json(200 if ok else 500,
                                {"ok": ok, "message": msg, "outlet": r})
@@ -4809,9 +6748,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, {"ok": True, "message": res.get("message"),
                                      "scene_switch": res})
                 else:
-                    self._json(403, {"ok": False, "error": "NEED_SUDO",
-                                     "message": res.get("message"),
-                                     "scene_switch": res})
+                    self._json(403, dict(priv_error(res.get("message")),
+                                         scene_switch=res))
                 return
             if path == "/api/trace":
                 if not self._check_write(payload):
@@ -4860,9 +6798,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 r = do_rescue(payload.get("password"))
                 if r.get("error") == "NEED_SUDO":
-                    self._json(403, {"ok": False, "error": "NEED_SUDO",
-                                     "message": r.get("message"),
-                                     "rescue": r.get("rescue")})
+                    self._json(403, dict(priv_error(r.get("message")),
+                                         rescue=r.get("rescue")))
                 else:
                     self._json(200 if r.get("ok") else 500,
                                {"ok": r.get("ok"), "message": r.get("message"),
@@ -4887,9 +6824,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
                 return
 
-            if ok is None and msg in ("NEED_SUDO", "BAD_PASSWORD"):
-                self._json(403, {"error": msg,
-                                 "message": "需要管理员密码" if msg == "NEED_SUDO" else "密码错误"})
+            if ok is None and msg in ("NEED_SUDO", "NEED_ADMIN", "BAD_PASSWORD"):
+                if msg == "BAD_PASSWORD":
+                    self._json(403, {"error": msg, "message": "密码错误"})
+                else:
+                    self._json(403, priv_error())
             elif ok:
                 self._json(200, {"ok": True, "message": msg, "result": do_scan()})
             else:
