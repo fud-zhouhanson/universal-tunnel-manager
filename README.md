@@ -138,7 +138,7 @@ universal-tunnel-manager/
 对外只交付**单文件** `tunnel-manager.py`（用户双击即用，这是产品卖点），
 所以源码拆包后必须在构建期拼回去。但源码**不是**一组互相 `import` 的模块：
 
-- 迁移前它是一份 6800 行的单命名空间脚本，227 个顶层函数互相随便调；
+- 迁移前它是一份 6883 行的单命名空间脚本，227 个顶层函数互相随便调；
   实测跨块引用 **471 处**、其中含 **10 组循环依赖** —— 硬拆 `import` 会直接 ImportError。
 - 现在按章节切成 **39 个切片**，**切片之间零 import**，谁调谁靠「同一命名空间」；
   顺序由 `tunnel_manager/_slices.py` 的 `SLICES` 持有（= 迁移前的书写顺序）。
@@ -185,7 +185,7 @@ tunnel_manager/
 │   ├── snapshot.py     健康基线快照 + 假 IP 池路由
 │   ├── rescue.py / rescue_win.py   一键应急恢复（双平台）
 │   └── flowrate.py     实时流速采样
-├── steam/              Steam 三网体检
+├── steam/              Steam 连接体检（加速是否真的生效）
 │   ├── paths.py  api.py  trace.py  sdr.py  capture.py  summary.py  commands.py
 └── web/httpd.py        HTTP 服务（Host/Origin/CSRF 校验）+ 路由表 + 前端内嵌
 ```
@@ -216,7 +216,7 @@ tunnel_manager/
 | POST | `/api/trace` | 真实流量体检 |
 | POST | `/api/rescue` | 一键应急恢复 |
 | POST | `/api/health/save` | 保存健康基线 |
-| POST | `/api/steam/probe` · `/api/steam/diagnose` | Steam 三网体检 |
+| POST | `/api/steam/probe` · `/api/steam/diagnose` | Steam 连接体检 |
 | POST | `/api/steam/capture/start` · `stop` / GET `/api/steam/capture/result` | 抓包采样 |
 | GET | `/api/steam/overview` | Steam 概览摘要 |
 
@@ -346,47 +346,27 @@ tunnel_manager/
 
 ---
 
-## 六·五、保命线守护（`guard_uplink.py`）—— 做隧道实验时的「防断线」
+## 六·五、保命线原理（`/32` 主机路由）—— 反复切换而不掉线的底气
 
-**为什么需要它**：本工具要做的事情就是反复切换隧道。但一旦我们与模型 API 的
-连接被隧道（aTrust 的聚合路由 / 雷神的 default 抢占）卷进去，对话会直接卡死 ——
+> 早期有一个独立脚本 `guard_uplink.py` 专门做这件事，**2026-10-05 已拆除** ——
+> 它的职责已被「切到本机直连」（六·六）覆盖。这一节保留的是它验证过的原理。
+
+**问题**：本工具要做的事情就是反复切换隧道。一旦我们与模型 API 的连接
+被隧道（aTrust 的聚合路由 / 雷神的 default 抢占）卷进去，对话会直接卡死 ——
 因为流量被导到校园出口，国际线路极慢甚至超时。
 
 **解法**：利用路由表的**最长前缀匹配** —— 给「本机正在使用的 API 服务器 IP」
 钉一条主机路由（IPv4 `/32`、IPv6 `/128`）指向物理网关。越具体的路由越优先，
 所以隧道再怎么加聚合路由也抢不走这条线。
+（实测：雷神全量接管下 `8.8.8.8` 会被拽走，而模型 API 的 IP 仍稳稳走物理网卡。）
 
-| 子命令 | 作用 | 需要 root |
-|---|---|---|
-| `check` | 只读体检：保命目标走物理还是隧道，是否已钉死 | 否 |
-| `once` | 钉一次路由，不常驻 | 是 |
-| `arm` | 钉路由 + 每 5 秒守护（隧道重刷路由会自动补回） | 是 |
-| `disarm` | 撤销本脚本加过的所有路由 | 是 |
-| `status` | 显示受保护目标与当前路由状态 | 否 |
+**验证时必须避开的一个陷阱**：只要目标有活动连接，内核就会生成一条 `WASCLONED`
+的临时主机路由，`route -n get` 看起来「已经走物理」，但那是缓存、连接一断就没了。
+→ 必须查 `netstat -rn` **主表**里带 `H`+`S` 标志的条目才算真钉住。
+（macOS 的 `netstat` 里主机路由**不写 `/32` 后缀**，只能靠 flags 里的 `H`(HOST)+`S`(STATIC) 判断。）
 
-```bash
-python3 guard_uplink.py check          # 随时体检，不影响任何配置
-sudo python3 guard_uplink.py arm       # 做隧道实验前，先把保命线守住
-```
-
-**保命目标怎么来**（两类合并去重）：
-1. **自动发现** —— 抓 `WorkBuddy / CodeBuddy / Electron` 等进程当前 `ESTABLISHED`
-   的公网连接对端 IP，也就是「对话链路本身」；
-2. **手动补充** —— `~/.tunnel-manager/guard_targets.txt` 里写域名或 IP，一行一个。
-
-**几个实测踩坑（都已在代码里处理）**：
-- `lsof` 每行末尾有 `(ESTABLISHED)`，连接串不是最后一列，得找含 `->` 的那个字段；
-- `lsof` 输出含非 UTF-8 字节（中文进程名），必须 `errors="replace"`；
-- **克隆路由陷阱**：只要目标有活动连接，内核就会生成一条 `WASCLONED` 的临时主机路由，
-  `route -n get` 看起来「已经走物理」，但那是缓存、连接一断就没了 →
-  必须查 `netstat -rn` **主表**里带 `H`+`S` 标志的条目才是真钉住；
-- macOS 的 `netstat` 里主机路由**不写 `/32` 后缀**，只能靠 flags 里的 `H`(HOST)+`S`(STATIC) 判断；
-- 以 root 运行时 `~` 会变成 `/var/root`，状态文件/日志会写到用户看不见的地方 →
-  脚本会回退到控制台登录用户的家目录，并把产物属主 `chown` 还回去。
-
-**怎么常驻**：用 `launchctl submit -l com.tm.guard -- <python> <guard_uplink.py> arm`
-注册一个 root 守护（不落 plist 文件，重启后失效，适合做实验期间用）。
-`nohup ... &` 在提权环境里无法 detach，别用。
+> 提权场景的通用坑：以 root 运行时 `~` 会变成 `/var/root`，状态文件/日志会写到
+> 用户看不见的地方 —— 提权脚本必须回退到控制台登录用户的家目录，并把产物 `chown` 还回去。
 
 ---
 
@@ -757,6 +737,50 @@ Windows 的提权是弹 UAC，**没有密码可输**。所以后端对前端用�
 
 ---
 
+## 六·十二、Steam 连接体检
+
+**它回答什么问题**：「我装了加速器，游戏到底走没走加速器？这加速器对**这个**游戏有用吗？」
+—— 体感说不清，日志说得清。
+
+**为什么值得单独一个模块**：联机"卡不卡"的归因太多（服务器、路由、ISP、加速器本身），
+ping 一个公网 IP 什么也证明不了。但 Steam 这条链路上有几处**可验证的事实**，
+把它们取出来摆在一起，比任何"测速"都可靠：
+
+| 来源 | 能证明什么 |
+|---|---|
+| `logs/connection_log.txt` 的 `local address` | **走没走加速的铁证** —— 例如 `172.21.0.2` 是雷神 utun、`192.168.10.173` 是 en0 物理网卡。（该文件 3.5 MB 且在增长，所以只 seek 读尾部 256 KB） |
+| Connection Manager 列表 + 实测延迟 | 连的是哪个数据中心、绕了多远 |
+| SDR 中继名单（`GetSDRConfig?appid=…`） | 这个游戏是不是走 Valve 中继 |
+| `nettop` 逐进程 / 逐接口采样 | 真实流量走了哪条网卡、重传多少 |
+
+**几条实测结论（决定了模块怎么写）**：
+
+- **很多现代游戏走 SDR（Valve 中继），不是传统 P2P 直连**（实测《杀戮尖塔 2》`appid=2868840`
+  返回 36 个 pop）。这种游戏上加速器**无益甚至有害**（多一跳 + MTU 变小），
+  "稳不稳"取决于实际命中的是哪个 relay。
+- **中继 IP 会换号**：本地 `appcache/sdr_config.txt` 只是上次联网时的缓存，实测采到的对端
+  经常不在名单里 → 必须有 **/24 同网段兜底**，并如实标注「同网段推断」；匹配不上的进 `unknown_peers`。
+- **ICMP 延迟 ≠ 游戏延迟**：界面上必须明标「网络层参考值」，不许冒充游戏延迟。
+- **CDN 上拿不到确定大小的公开文件**（depot chunk 需要 key）→ 所以**不做"自动测速"**。
+  真要测速度，用 `nettop -P -x -l N -J interface,bytes_in,bytes_out,rtt_avg,re-tx` 边下边测
+  （逐进程 + 逐接口，无需 root）。
+- 注意区分**「Steam 平台流量」与「游戏 UDP 流量」**：别把"平台没走加速"误报成"加速失效"。
+
+**接口**：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/api/steam/overview` | 概览摘要（首屏用，省一次完整体检） |
+| POST | `/api/steam/probe` | 基础探测：装没装 / 在不在跑 / 下载区域 / 日志时间线 / 最近一次连接的归属 |
+| POST | `/api/steam/diagnose` | 完整体检：逐项给出结论与建议 |
+| POST | `/api/steam/capture/start` · `stop` | 抓包采样（配合 `nettop`） |
+| GET | `/api/steam/capture/result` | 取采样结果 |
+
+**容错**：外部接口一律走「进程内缓存 + TTL + 失败熔断」（失败后 3 分钟冷却）。
+没有熔断的话，一次网络不通会让「体检」按钮从十几秒变成四十多秒。
+
+---
+
 ## 七、运行
 
 ### 7.1 本机开发/使用（源码态）
@@ -779,7 +803,7 @@ bash ~/universal-tunnel-manager/start.sh
 
 ```bash
 python3 build.py
-# 产物：dist/tunnel-manager.py (85 KB) + dist/tunnel-manager.zip (32 KB)
+# 产物：dist/tunnel-manager.py (约 460 KB) + dist/tunnel-manager.zip (约 180 KB)
 ```
 
 把 `dist/tunnel-manager.zip` 发给别人，对方解包后按平台执行：
@@ -812,21 +836,21 @@ Windows 用户常常没有 Python。而**macOS 上无法交叉编译出 `.exe`**
 python3 make_win_pkg.py
 # 首次会自动下载 python-3.13.12-embed-amd64.zip (~11 MB)，缓存在 dist/_winbuild/
 # 产物：dist/TunnelManager-Windows-x64.zip    (10.4 MB，完整版)
-#       dist/TunnelManager-Windows-lite.zip   (160 KB，精简版)
+#       dist/TunnelManager-Windows-lite.zip   (约 180 KB，精简版)
 ```
 
 **一个脚本出两个包**，差别只有一个维度 —— 带不带运行时：
 
 | | 完整版 `…-Windows-x64.zip` | 精简版 `…-Windows-lite.zip` |
 |---|---|---|
-| 体积 | 10.4 MB | **160 KB** |
+| 体积 | 10.4 MB | **约 180 KB** |
 | 自带 Python | ✅ 有 `runtime/` | ❌ 无 |
 | 对方要装什么 | **什么都不用装** | 需要电脑上已有 Python 3 |
 | 怎么找解释器 | 固定用包内 `runtime\python.exe` | 依次试 `py -3` → `python` → `python3`，**真的执行一句 `import sys` 才算数** |
 | 什么时候用 | 默认发它，最省事 | 对方本来就装了 Python（或不想下 10 MB） |
 
 > **精简版存在的理由很单纯**：10.4 MB 里 **99% 是 `runtime/`**，程序本体只有一个
-> 440 KB 的 `.py`。已经装过 Python 的人没必要再下一遍运行时。
+> 460 KB 的 `.py`。已经装过 Python 的人没必要再下一遍运行时。
 > 但**默认还是发完整版** —— 你没法保证对方装了 Python；精简版找不到解释器时，
 > 启动器会直接提示他改用完整版。
 
@@ -843,7 +867,7 @@ TunnelManager-Windows-x64/          （完整版）
 ├── 使用说明.txt
 ├── selftest.py
 ├── app/tunnel-manager.py
-└── runtime/              ← 嵌入式 Python（32 个文件，10.2 MB）
+└── runtime/              ← 嵌入式 Python（32 个文件，解压后约 19.7 MB，压缩进包约 10.3 MB）
 
 TunnelManager-Windows-lite/         （精简版）
 ├── START-双击启动.bat    ← 改成去系统里找 Python
@@ -858,7 +882,7 @@ TunnelManager-Windows-lite/         （精简版）
 
 **内置了自检工具**（`检查运行.bat` + `selftest.py`）：对方启动不了、或者想先确认环境，
 双击 `检查运行.bat` 就会跑一遍全面检查并生成「检查报告.txt」，把那个文件发回来即可定位。
-另外还会单独产出 `dist/运行检查工具.zip`（10 KB），可以只把这一个小包发给
+另外还会单独产出 `dist/运行检查工具.zip`（约 22 KB），可以只把这一个小包发给
 "已经下过整包"的人；落地页上也内嵌了它的下载入口。
 
 自检做三件事，**全部只读**（不改路由、不动 DNS、不装东西）：
@@ -915,29 +939,36 @@ python3 make_download_page.py # 生成 dist/download.html
 > | `x.zip` / `x.ZIP` / `x.zip.download` | ❌ 403 拦截页（**只要包含 `.zip` 就拦**，大小写不敏感） |
 > | `x.dat` / `x.bin` / 无扩展名 | ✅ 200，`application/octet-stream` |
 >
-> - **通用包（113 KB）**：base64 内嵌进 HTML，点按钮时浏览器**本地** Blob 还原下载，
+> - **通用包（约 180 KB）**：base64 内嵌进 HTML，点按钮时浏览器**本地** Blob 还原下载，
 >   不产生服务器下载请求，任何网络策略都拦不到。
-> - **Windows 免安装包（10.3 MB）**：改名 `TunnelManager-Windows-x64.dat` 放静态目录，
+> - **Windows 免安装包（10.4 MB）**：改名 `TunnelManager-Windows-x64.dat` 放静态目录，
 >   页面上用 `<a href="./….dat" download="….zip">` —— `download` 属性让浏览器**存回 `.zip`**，用户无感。
->   若把它也内嵌，落地页会从 **158 KB 涨到约 14 MB**。
+>   若把它也内嵌，落地页会从 **约 525 KB 涨到约 14 MB**。
 >
 > 探测这类规则时，造几个 2 KB 的探针文件部署一次就问出来了，不必反复上传大文件。
 
 ### 7.4 只想先看看界面长什么样
 
+直接以源码态启动即可 —— 真实界面 + 真实后端数据：
+
 ```bash
-python3 make_preview.py       # 生成 preview.html
-open preview.html             # macOS；Windows 直接双击
+python3 -m tunnel_manager.main        # 自动打开 http://127.0.0.1:7531
 ```
 
-`preview.html` 把后端的 `/api/*` 换成示例数据，不启动服务也能看到全部卡片，
-按钮点击会在示例数据上真实响应（用于确认界面与交互）。
+也可以「不启动服务，只看渲染效果」：直接双击仓库根的 `index.html`。
+它是完整前端，只是所有 `/api/*` 都取不到数据（卡片显示为空），
+适合快速确认样式改动，不影响任何系统配置。
 
 ---
 
 ## 八、已知边界
 
-- **Windows 分支**仅做语法检查与逻辑审查，未实机测试（手边无 Windows 机器）。
+- **Windows 分支未在真机完整测试**（能启动、界面可用，网络扫描与改路由的行为需实测）。
+  包里自带体检工具（`检查运行.bat`），出问题把「检查报告.txt」发回来即可定位。
+- **「一键切换出口」目前只在 macOS 完整支持。**
+- **按进程分流**（只让某个程序走隧道）在 macOS 用户态**做不到** —— 需要
+  Network Extension 或内核扩展，这也是所有加速器都必须装特权 helper 的原因。
+- Windows 免安装包内置的是 **amd64（64 位）** 运行时；32 位或 ARM 版 Windows 需另换运行时。
 - **浏览器历史追踪**依赖「完全磁盘访问」（Safari）或可读的浏览器 Profile 目录；
   无权限/无浏览器时追踪集为空，用手动输入框兜底即可，不影响其它功能。
 - 隧道客户端若用「不落路由表」的方式接管流量（如某些 hook DNS / LSP 全局代理方案），
@@ -998,7 +1029,7 @@ bash scripts/build.sh
 | 文件 | 给谁 |
 |---|---|
 | `TunnelManager-Windows-x64.zip` | Windows **完整版**，免安装（内置 Python 运行时，10.4 MB） |
-| `TunnelManager-Windows-lite.zip` | Windows **精简版**（不带运行时，160 KB，需对方已有 Python 3） |
+| `TunnelManager-Windows-lite.zip` | Windows **精简版**（不带运行时，约 180 KB，需对方已有 Python 3） |
 | `tunnel-manager.zip` | macOS / Linux（需系统自带 Python 3） |
 | `RunCheck-tool.zip` / `运行检查工具.zip` | 备用体检小包（前一个 ASCII 名供 Release/Pages 直链） |
 | `download.html` | 分享落地页（小包以 base64 内嵌，浏览器本地生成下载） |
@@ -1013,7 +1044,7 @@ bash scripts/build.sh
 | | `dist/download.html`（分享用） | `docs/index.html`（Pages 用） |
 |---|---|---|
 | 下载控件 | `<button>` + base64，**浏览器本地**生成文件 | 普通 `<a href>` 指向 GitHub Releases |
-| 页面体积 | ≈ 包体积 × 1.33 | 约 12 KB |
+| 页面体积 | ≈ 包体积 × 1.33（当前约 525 KB） | 约 18 KB |
 | 为什么这样 | 托管平台的 WAF 按「URL 里含 `.zip`」拦（实测 403，大小写不敏感），内嵌可绕过 | Releases 资源由 github.com 提供，没有 WAF 问题，页面就能保持很小 |
 
 ### 11.3 发布 Release
@@ -1076,18 +1107,7 @@ sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
 
 ---
 
-## 十四、已知边界
-
-- **Windows 分支未在真机完整测试**（能启动、界面可用，网络扫描与改路由的行为需实测）。
-  包里自带体检工具（`检查运行.bat`），出问题把「检查报告.txt」发回来即可定位。
-- 「一键切换出口」目前**只在 macOS 完整支持**。
-- 按进程分流（只让某个程序走隧道）在 macOS 用户态**做不到** —— 需要
-  Network Extension 或内核扩展，这也是所有加速器都必须装特权 helper 的原因。
-- Windows 免安装包内置的是 **amd64（64 位）** 运行时；32 位或 ARM 版 Windows 需另换运行时。
-
----
-
-## 十五、免责声明
+## 十四、免责声明
 
 **这是一个免费的开源项目，按「现状」（AS IS）提供。作者什么都不承诺，也什么都不承担。**
 
