@@ -122,22 +122,35 @@ def scan_win(domains, software):
     def_iface, def_gw = default_route_win(snap)
     raw = scan_interfaces_win()
 
-    phys_iface = ""
-    for i in raw:
-        if is_loopback_iface(i.get("name"), i.get("desc")):
-            continue                       # 回环口也「有 IP、算 active」，必须排掉
-        if i.get("type") in (6, 71) and i.get("status") == "active":
-            phys_iface = i["name"]
-            break
-    if not phys_iface:
+    # 物理出口：**优先认默认路由所在的口** —— 那才是流量真正出去的地方。
+    # （2026-10-14 真机实锤的 bug：v1 是「抓第一个 active 的以太网/WiFi 类型口」，
+    #   在装了 Radmin VPN 这类以太网型虚拟网卡、且它接口跃点极小（metric 1）
+    #   的机器上，第一个抓到的就是它 —— 于是「物理出口：Radmin VPN」，而默认
+    #   路由明明走 WLAN。macOS 侧（scan_mac）一直是先认默认路由的，这里对齐。）
+    def_active = next((i for i in raw if i.get("name") == def_iface
+                       and i.get("status") == "active"), None)
+    if def_active and not is_loopback_iface(def_iface, def_active.get("desc")) \
+            and not is_tunnel_iface(def_iface, def_active.get("desc")):
+        phys_iface = def_iface
+    else:
+        phys_iface = ""
         for i in raw:
             if is_loopback_iface(i.get("name"), i.get("desc")):
-                continue
-            if not is_tunnel_iface(i["name"], i["desc"]) and i.get("status") == "active":
+                continue                       # 回环口也「有 IP、算 active」，必须排掉
+            if is_tunnel_iface(i["name"], i["desc"]):
+                continue                       # 隧道口再靠前也不能当物理出口
+            if i.get("type") in (6, 71) and i.get("status") == "active":
                 phys_iface = i["name"]
                 break
-    if not phys_iface:
-        phys_iface = def_iface if not is_tunnel_iface(def_iface) else ""
+        if not phys_iface:
+            for i in raw:
+                if is_loopback_iface(i.get("name"), i.get("desc")):
+                    continue
+                if not is_tunnel_iface(i["name"], i["desc"]) and i.get("status") == "active":
+                    phys_iface = i["name"]
+                    break
+        if not phys_iface:
+            phys_iface = def_iface if not is_tunnel_iface(def_iface) else ""
 
     gw_by_iface = {}
     for r in snap.get("routes", []):

@@ -23,12 +23,22 @@ def is_tunnel_iface(name, desc=""):
     # ⚠️ Windows 的隧道网卡**名字不叫 utunN**，而是厂商描述，例如
     #    「Sangfor SSL VPN CS Support System VNIC」（aTrust 就是这个）。
     #    不认出来它就会被当成物理网卡 —— 整个「物理 vs 隧道」的判断都会反过来。
+    # 2026-10-14 真机（LAPTOP-EHGLSHI0）实锤：「Famatech Radmin VPN Ethernet
+    #    Adapter」类型是普通以太网(type 6)、描述里也没有旧关键词 —— 它被当成
+    #    物理网卡后，scan_win 的「抓第一个 active 以太网口」就把出口认到了它头上。
+    #    因此补上常见虚拟组网 / 加速器 / 代理工具的适配器描述关键词。
     return any(k in blob for k in ("tap-", "tun-", "virtual adapter",
                                    "virtual ethernet", "虚拟网卡",
                                    "vnic", "ssl vpn", "vpn adapter",
                                    "sangfor", "深信服", "easyconnect",
                                    "anyconnect", "openvpn", "wireguard",
-                                   "forticlient", "secoclient", "pangolin"))
+                                   "forticlient", "secoclient", "pangolin",
+                                   # 虚拟组网（游戏联流/局域网互联类）
+                                   "radmin", "hamachi", "zerotier", "tailscale",
+                                   # 隧道驱动与常见代理 / 加速器
+                                   "wintun", "tap-windows", "tun2socks",
+                                   "leigod", "xunyou", "uugame",
+                                   "clash", "mihomo", "sing-box", "v2ray"))
 
 
 def is_phys_iface(name, desc=""):

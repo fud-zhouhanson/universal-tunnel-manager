@@ -200,8 +200,13 @@ def check_system():
         else:
             warn("管理员权限", "无法判定")
 
-        rc, out = sh(["chcp"], timeout=10)
-        info("控制台代码页", (out or "?").strip())
+        # ⚠️ chcp 在个别机器上从 PATH 找不到（真机实测 [WinError 2]）——
+        #    它其实永远在 %SystemRoot%\\System32 里，用绝对路径兜底。
+        _chcp = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                             "System32", "chcp.com")
+        rc, out = sh([_chcp if os.path.exists(_chcp) else "chcp"], timeout=10)
+        info("控制台代码页", (out or "?").strip() if rc == 0
+             else "读不到（不影响功能，只是这项检查空着）")
     else:
         skip("管理员权限 / 代码页", "只有 Windows 需要看这两项，macOS 上不适用")
 
@@ -667,12 +672,9 @@ def check_outlets():
     else:
         info("读系统 VPN（Get-VpnConnection）", "没有配置系统自带的 VPN（正常）")
 
-    # ④ 残留路由：**只列不删**
+    # ④ 残留路由：**只列不删**（与主程序共用同一判定，别再复制一份口径）
     try:
-        valid = mod.active_ifaces()
-        stale = sorted({d for d, a in mod._routes_snapshot()
-                        if d != "default" and a and a not in valid},
-                       key=lambda d: -len(d))
+        stale = mod.win_stale_routes()
         if stale:
             warn("残留路由预演（只列不删）",
                  "%d 条指向已消失的接口：%s" % (len(stale), "、".join(stale[:6])))

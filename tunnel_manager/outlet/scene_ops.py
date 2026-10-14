@@ -66,20 +66,41 @@ def _del_route_cmd(dest):
     return f"route -n delete -host {dest}"
 
 
+def win_stale_routes():
+    """列出「指向已消失接口」的 IPv4 路由前缀 —— 只列不删，自检与清理共用。
+
+    判定口径（2026-10-14 真机实锤后收紧）：一个前缀只有当它的**所有**接口
+    绑定都不是现存接口时才算残留。不能按「有一条绑定不在就算」——
+    224.0.0.0/4、255.255.255.255 这类组播/广播路由会同时挂在回环和每块
+    物理网卡上，而**回环不在 Get-NetAdapter 的名单里**（Get-NetRoute 却会给
+    出它的绑定）→ 按旧口径整段组播路由都会被误判成残留，提权清理时还会
+    把物理网卡上的那条一起删掉。回环永远算「活着」；组播与受限广播段
+    无论绑在哪都不收（本工具按设计不接管它们）。
+    """
+    valid = active_ifaces()
+
+    def _alive(alias):
+        return (not alias) or alias in valid or is_loopback_iface(alias)
+
+    bindings = {}
+    for dest, alias in _routes_snapshot():
+        if dest == "default":
+            continue                       # 默认路由永远不动
+        bindings.setdefault(dest, set()).add(_alive(alias))
+    return sorted(
+        (d for d, alive in bindings.items()
+         if alive and not any(alive)
+         and not d.startswith("224.") and d != "255.255.255.255"),
+        key=lambda d: -len(d))
+
+
 def _win_clean_residual_routes():
     """Windows：删掉「所在接口已经不存在」的 IPv4 路由。
 
     与 macOS 同口径 —— 只动「指向不存在接口」的条目，**绝不碰默认路由**，
     也不碰任何还活着的接口上的路由。
     """
-    valid = active_ifaces()
-    stale = []
-    for dest, alias in _routes_snapshot():
-        if dest == "default":
-            continue                       # 默认路由永远不动
-        if alias and alias not in valid:
-            stale.append(dest)
-    stale = sorted(set(stale), key=lambda d: -len(d))
+    stale = win_stale_routes()
     if not stale:
         return 0, "无残留路由"
 

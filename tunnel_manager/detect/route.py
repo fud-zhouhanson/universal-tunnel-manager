@@ -90,7 +90,7 @@ def _win_snapshot_ps():
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "try { [PSCustomObject]@{"
         "routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
-        "Select InterfaceAlias,NextHop,InterfaceMetric) } | "
+        "Select InterfaceAlias,NextHop,RouteMetric,InterfaceMetric) } | "
         "ConvertTo-Json -Depth 4 } catch {}"
     )
     if rc != 0 or not out:
@@ -102,14 +102,28 @@ def _win_snapshot_ps():
 
 
 def default_route_win(snap):
-    for r in snap.get("routes", []):
-        alias = r.get("InterfaceAlias", "")
-        if not is_tunnel_iface(alias, ""):
-            return alias, r.get("NextHop", "")
-    routes = snap.get("routes", [])
-    if routes:
-        return routes[0].get("InterfaceAlias", ""), routes[0].get("NextHop", "")
-    return "", ""
+    """按 Windows 真实选路规则挑默认路由：**路由跃点 + 接口跃点合计**最小者。
+
+    一台机器可能同时挂着多条 0.0.0.0/0 —— 比如 Radmin VPN 这类虚拟网卡的
+    合计跃点动辄几千（真机实测 9257），而物理 WiFi 只有几十（45）。
+    Windows 实际用的那条是合计跃点最小的；v1「拿第一条非隧道就算数」，
+    路由返回顺序一变就会认到一条根本不会被使用的路由上。
+    """
+    rows = [r for r in (snap.get("routes") or []) if r.get("InterfaceAlias")]
+    if not rows:
+        return "", ""
+
+    def _metric(r):
+        try:
+            return int(r.get("RouteMetric") or 0) + int(r.get("InterfaceMetric") or 0)
+        except (TypeError, ValueError):
+            return 1 << 30
+
+    pool = [r for r in rows if not is_tunnel_iface(r.get("InterfaceAlias", ""), "")]
+    if not pool:
+        pool = rows                       # 全是隧道口时只能矮子里的将军
+    best = min(pool, key=_metric)
+    return best.get("InterfaceAlias", ""), best.get("NextHop", "")
 
 
 def default_route():
@@ -139,29 +153,33 @@ def iface_of_ip(ip):
 def iface_of_win_batch(ips):
     if not ips:
         return {}
-    if not ps_available()[0]:
-        return _nat_iface_of_batch(ips)     # 自家长前缀匹配，无本地化风险
-    ip_list = ",".join(f"'{i}'" for i in ips)
-    rc, out, _ = run_ps(
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
-        f"$ips = @({ip_list});"
-        "foreach ($i in $ips) {"
-        "  $r = Find-NetRoute -DestinationIPAddress $i "
-        "-ErrorAction SilentlyContinue | Select-Object -First 1;"
-        "  [PSCustomObject]@{ ip = $i; iface = $r.InterfaceAlias }"
-        "} | ConvertTo-Json"
-    )
-    result = {}
-    if rc != 0 or not out:
-        return result
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return result
-    if isinstance(data, dict):
-        data = [data]
-    for row in data:
-        result[row.get("ip", "")] = row.get("iface", "") or ""
-    return result
+    if ps_available()[0]:
+        ip_list = ",".join(f"'{i}'" for i in ips)
+        rc, out, _ = run_ps(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+            f"$ips = @({ip_list});"
+            "foreach ($i in $ips) {"
+            "  $r = Find-NetRoute -DestinationIPAddress $i "
+            "-ErrorAction SilentlyContinue | Select-Object -First 1;"
+            "  [PSCustomObject]@{ ip = $i; iface = $r.InterfaceAlias }"
+            "} | ConvertTo-Json"
+        )
+        result = {}
+        if rc == 0 and out:
+            try:
+                data = json.loads(out)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                data = [data]
+            for row in (data or []):
+                result[row.get("ip", "")] = row.get("iface", "") or ""
+        # ⚠️ Find-NetRoute 在部分企业策略 / 受限语言模式下会**静默返回空**
+        #    （2026-10-14 真机：Get-NetRoute 一切正常，唯独它一条都解不出来，
+        #    前端整列「via ?」）。空结果 / 全空一律退回自家长前缀匹配 ——
+        #    那条路不依赖任何 PowerShell cmdlet，选路依据也和 Windows 一致。
+        if result and any(result.values()):
+            return result
+    return _nat_iface_of_batch(ips)
 
 
