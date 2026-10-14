@@ -1235,6 +1235,60 @@ def check_win_env():
     EXTRA_DUMP = dump
 
 
+def check_steam():
+    """十五、Steam 环境探测 —— 装在哪、跑没跑、连接日志在不在。
+
+    背景（2026-10-14 真机反馈）：那台机器上「Steam 体检」报找不到 Steam。
+    旧版只扫三个默认位置（Program Files ×2 / LOCALAPPDATA），装在 D 盘的
+    Steam 会被整个漏掉。这一段把**找过哪些位置、命中了哪个**全列出来 ——
+    一眼区分「没装」「装在别处」「装了但没登录过」三种情况。
+    """
+    import time
+    sec("十五、Steam 环境探测")
+    try:
+        mod = load_app()
+    except Exception as e:                  # noqa: BLE001
+        fail("Steam 环境", "程序主体加载失败：%s: %s" % (type(e).__name__, e))
+        return
+    env, err = call_timeout(mod.steam_env, 120)
+    if err is not None:
+        fail("Steam 环境", str(err))
+        return
+    dirs = mod.steam_dirs()
+    root = env.get("root") or ""
+    if root:
+        ok("Steam 安装目录", root)
+    else:
+        warn("Steam 安装目录",
+             "没找到 —— 已找过 %d 处：%s%s" % (
+                 len(dirs), "、".join(dirs[:6]),
+                 "…" if len(dirs) > 6 else ""))
+        info("   提示", "如果确实装了 Steam，把它的安装路径发回来即可定位")
+        return
+    info("运行状态", "Steam 正在运行" if env.get("running")
+         else "Steam 没在运行（「连接日志」里是上次连接的记录）")
+    logs = env.get("logs") or {}
+    c = logs.get("connection_log.txt")
+    if c:
+        mt = time.strftime("%m-%d %H:%M", time.localtime(c.get("mtime") or 0))
+        ok("connection_log.txt",
+           "%s（%.1f MB，最后写入 %s）" % (
+               os.path.join(root, "logs", "connection_log.txt"),
+               (c.get("size") or 0) / 1048576, mt))
+    else:
+        warn("connection_log.txt",
+             "Steam 目录找到了，但 logs/connection_log.txt 还没生成 —— "
+             "Steam 启动并登录过一次后才会写这个文件")
+    if env.get("persona") or env.get("steamid"):
+        info("账号", "%s %s" % (env.get("persona") or "?",
+                               env.get("steamid") or ""))
+    else:
+        info("账号", "读不到（loginusers.vdf 缺失或还没登录过）")
+    apps = env.get("installed_apps") or []
+    info("已装游戏", "%d 个" % len(apps) if apps
+         else "读不到（libraryfolders 里没有记录）")
+
+
 def main():
     # 先把 stdout 改成 utf-8 + 容错，保证**脚本自己**不会因为中文崩溃
     # （原始编码已经在 ORIG_STDOUT_ENC 里记下来了，报告里会体现）
@@ -1249,7 +1303,7 @@ def main():
     for fn in (check_system, check_encoding, check_runtime, check_files,
                check_cmds, check_ports, check_httpserver, check_dns,
                check_app_real, check_clients, check_outlets, check_win_env,
-               check_rules, check_api):
+               check_rules, check_api, check_steam):
         try:
             fn()
         except BaseException as e:      # noqa: BLE001 —— 单项崩了不能拖垮整份报告

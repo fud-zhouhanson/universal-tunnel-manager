@@ -169,6 +169,8 @@ def steam_env():
     return {
         "installed": bool(root),
         "root": root,
+        # 没找到时把「找过几处」报给前端，横幅能直接告诉用户去哪找问题
+        "searched": len(steam_dirs()) if not root else 0,
         "running": bool(running),
         "logs": files,
         "sdr_cache": steam_path("appcache", "sdr_config.txt"),

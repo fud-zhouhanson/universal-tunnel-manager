@@ -78,7 +78,19 @@ def parse_steam_conn_log():
     row = {"ok": False, "error": "", "path": p, "cm": [], "latest": [],
            "external_ip": "", "at": "", "mtime": None}
     if not p or not os.path.isfile(p):
-        row["error"] = "找不到 connection_log.txt（Steam 可能从未运行过）"
+        # 两种「找不到」要分清楚，不然用户没法行动：
+        #   · 目录就没找到 → 把**找过哪几处**列出来，方便对方把真实路径发过来；
+        #   · 目录找到了但日志缺失 → 说清「Steam 启动并登录后才会写这个文件」。
+        root = steam_root()
+        if root:
+            row["error"] = ("找到 Steam 目录（%s），但里面还没有 logs/connection_log.txt —— "
+                            "Steam 启动并登录过一次后才会生成这个日志" % root)
+        else:
+            dirs = steam_dirs()
+            head = "、".join(dirs[:5]) + ("…" if len(dirs) > 5 else "")
+            row["error"] = ("没找到 Steam 安装目录（找过 %d 处：%s）—— "
+                            "如果确实装了 Steam，请把它的安装路径发过来"
+                            % (len(dirs), head))
         return row
     try:
         row["mtime"] = os.path.getmtime(p)

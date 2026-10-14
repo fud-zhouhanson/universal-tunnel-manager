@@ -2206,7 +2206,7 @@ async function steamOverview() {
     const j = await (await fetch('/api/v1/steam/overview')).json();
     if (!j.ok) { steamErr(j.error || '快照失败'); return; }
     const env = j.env || {};
-    if (!env.installed) { steamErr('没找到 Steam 安装目录，下面的检测都没有对象。'); return; }
+    if (!env.installed) { steamErr('没找到 Steam 安装目录（已在 ' + (env.searched || 0) + ' 处常见位置找过，含各盘符与注册表）—— 如果确实装了 Steam，把它的安装路径发过来即可定位。'); return; }
     steamErr('');
     $('steamMeta').innerHTML = `账号 <b>${esc(env.persona || '—')}</b>`
       + (env.steamid ? `（<span class="mono">${esc(env.steamid)}</span>）` : '')

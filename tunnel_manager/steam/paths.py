@@ -69,19 +69,89 @@ STEAM_POP_NAMES = {
 # Steam 目录与文件定位（跨平台）
 # ----------------------------------------------------------------------
 
+def _win_steam_from_registry():
+    """从注册表读 Steam 安装路径 —— 官方安装器**必然**写这几处，是权威来源。
+
+    只扫 Program Files / LOCALAPPDATA 是不够的：Steam 允许装到任意目录
+    （真机反馈：把软件装 D 盘的习惯很常见，`D:\\Steam` 这类会全漏掉）。
+    """
+    out = []
+    try:
+        import winreg
+    except ImportError:                      # 非 Windows 上直接空手而归
+        return out
+
+    def _get(hive, sub, val, flag=0):
+        try:
+            with winreg.OpenKey(hive, sub, 0, winreg.KEY_READ | flag) as k:
+                p, _ = winreg.QueryValueEx(k, val)
+                if p:
+                    out.append(str(p))
+        except OSError:
+            pass
+
+    _get(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam", "SteamPath")
+    _get(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam", "SteamExe")
+    _get(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath")
+    _get(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath",
+         winreg.KEY_WOW64_32KEY)
+    res = []
+    for p in out:
+        p = os.path.normpath(p)              # 注册表里常是正斜杠 c:/program files/steam
+        if p.lower().endswith(".exe"):       # SteamExe 给的是 steam.exe 的完整路径
+            p = os.path.dirname(p)
+        res.append(p)
+    return res
+
+
+def _win_steam_from_drives():
+    """扫各**本地固定盘**的常见位置 —— 兜底注册表缺失 / 绿色安装。
+
+    只认 DRIVE_FIXED（本地磁盘，类型 3），跳过 U 盘与网络盘：
+    对网络盘做 isdir() 可能长时间卡住，而 Steam 装在网络盘上没有意义。
+    """
+    out = []
+    try:
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:                        # noqa: BLE001
+        return out
+    subs = ("Steam", "SteamLibrary", "Games\\Steam",
+            "Program Files (x86)\\Steam", "Program Files\\Steam")
+    for i in range(26):
+        if not bitmask & (1 << i):
+            continue
+        letter = chr(ord("A") + i)
+        try:
+            if ctypes.windll.kernel32.GetDriveTypeW(letter + ":\\") != 3:
+                continue
+        except Exception:                    # noqa: BLE001
+            continue
+        out.extend(letter + ":\\" + s for s in subs)
+    return out
+
+
 def steam_dirs():
     """按平台列出 Steam 根目录候选。用户级安装优先于全局安装。"""
     home = os.path.expanduser("~")
     if IS_MAC:
         return [os.path.join(home, "Library", "Application Support", "Steam")]
     if IS_WIN:
-        cands = []
+        cands = _win_steam_from_registry()   # 权威：官方安装器写注册表
+        cands.append(os.path.join(os.environ.get("LOCALAPPDATA") or home, "Steam"))
         for env in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
             base = os.environ.get(env)
             if base:
                 cands.append(os.path.join(base, "Steam"))
-        cands.append(os.path.join(os.environ.get("LOCALAPPDATA") or home, "Steam"))
-        return cands
+        cands.extend(_win_steam_from_drives())
+        seen, out = set(), []                # 去重保序（注册表大概率命中前几个）
+        for d in cands:
+            d = (d or "").rstrip("\\/")
+            k = d.lower()
+            if d and k not in seen:
+                seen.add(k)
+                out.append(d)
+        return out
     return [os.path.join(home, ".steam", "steam"),
             os.path.join(home, ".local", "share", "Steam")]
 
